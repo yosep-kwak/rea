@@ -50,6 +50,7 @@ const FILESYSTEM_ERROR_CODES = new Set([
   "ENOSPC",
   "EPERM",
   "EROFS",
+  "ERR_REA_WINDOWS_NATIVE",
 ]);
 
 export interface FilesystemFailureDetail {

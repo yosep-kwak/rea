@@ -33,7 +33,7 @@ const IMPORT_FAILURE_GUIDANCE = {
   "invalid-root":
     "Reference source directory could not be opened. Check that the path exists, is readable, and points to a directory.",
   unsupported:
-    "Safe no-follow file opens are unavailable on this host. Import the source tree with REA on Linux (including WSL) or macOS.",
+    "Safe no-follow file opens are unavailable on this host. On Windows x64, restore or build the matching packaged native controls and use a fixed local NTFS source directory; otherwise use Linux or macOS.",
   io: "Reference source files could not be read. Check directory permissions and try again.",
   parse:
     "Reference source could not be indexed. Check that the source tree is readable, then try again.",

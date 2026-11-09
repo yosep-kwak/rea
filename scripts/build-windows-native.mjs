@@ -17,6 +17,7 @@ const { WINDOWS_NATIVE_ARTIFACT, createWindowsNativeManifest } =
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const nodeVersion = "22.19.0";
 const compiler = "x86_64-w64-mingw32-g++";
+const windowsHost = process.platform === "win32";
 const cache = join(homedir(), ".cache", "rea-windows-native");
 const inspectionFixture = process.argv[2] === "--inspection-fixture";
 if (process.argv.length > 3 || (process.argv.length > 2 && !inspectionFixture))
@@ -24,12 +25,15 @@ if (process.argv.length > 3 || (process.argv.length > 2 && !inspectionFixture))
 const output = inspectionFixture
   ? join(root, ".cache", "windows-native-inspection-fixture")
   : join(root, "native", "windows", "build");
+let buildEnvironment = process.env;
 const run = (command, args) => {
   const result = spawnSync(command, args, {
     cwd: root,
     encoding: "utf8",
     maxBuffer: 4 * 1_024 * 1_024,
     timeout: 120_000,
+    env: buildEnvironment,
+    windowsHide: true,
   });
   if (result.error !== undefined)
     throw new Error(
@@ -41,11 +45,54 @@ const run = (command, args) => {
     );
   return result.stdout;
 };
-if (process.platform !== "linux")
+if (process.platform !== "linux" && !windowsHost)
   throw new Error(
-    "The Windows x64 artifact build lane currently requires Linux and MinGW-w64.",
+    "The Windows x64 artifact build lane requires Linux/MinGW-w64 or Windows/Visual Studio C++ x64 tools.",
   );
-run(compiler, ["--version"]);
+if (windowsHost) {
+  const vswhere = join(
+    process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)",
+    "Microsoft Visual Studio",
+    "Installer",
+    "vswhere.exe",
+  );
+  const installation = run(vswhere, [
+    "-latest",
+    "-products",
+    "*",
+    "-requires",
+    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+    "-property",
+    "installationPath",
+  ]).trim();
+  if (!installation)
+    throw new Error(
+      "Install the Visual Studio C++ x64 build tools before building the Windows addon.",
+    );
+  const setup = join(installation, "VC", "Auxiliary", "Build", "vcvars64.bat");
+  // Only the installed toolchain's fixed setup script is interpreted by cmd.
+  // Compilation below always receives an argv array and never uses a shell.
+  const configured = spawnSync(
+    process.env.ComSpec ?? "cmd.exe",
+    ["/d", "/u", "/s", "/c", `"call "${setup}" >nul && set"`],
+    {
+      encoding: "utf16le",
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+      timeout: 30_000,
+    },
+  );
+  if (configured.error || configured.status !== 0)
+    throw new Error(
+      `Visual Studio C++ environment setup failed: ${configured.error?.message ?? configured.status}`,
+    );
+  buildEnvironment = { ...process.env };
+  for (const line of configured.stdout.split(/\r?\n/u)) {
+    const separator = line.indexOf("=");
+    if (separator > 0)
+      buildEnvironment[line.slice(0, separator)] = line.slice(separator + 1);
+  }
+} else run(compiler, ["--version"]);
 await mkdir(cache, { recursive: true });
 await mkdir(output, { recursive: true });
 const exists = async (path) =>
@@ -119,30 +166,61 @@ await writeFile(
   definition,
   `LIBRARY node.exe\nEXPORTS\n${symbols.join("\n")}\n`,
 );
-run("x86_64-w64-mingw32-dlltool", ["-d", definition, "-y", library]);
-run(compiler, [
-  "-std=c++17",
-  "-O2",
-  `-DNAPI_VERSION=${WINDOWS_NATIVE_ARTIFACT.nodeApiVersion}`,
-  "-D_WIN32_WINNT=0x0A00",
-  "-shared",
-  "-static",
-  "-static-libgcc",
-  "-static-libstdc++",
-  "-Wl,--no-insert-timestamp",
-  `-I${headers}`,
-  "native/windows/src/addon.cc",
-  inspectionFixture
-    ? "tests/fixtures/windows-native-inspection-failure.cc"
-    : "native/windows/src/filesystem.cc",
-  "native/windows/src/process.cc",
-  library,
-  "-ladvapi32",
-  "-lbcrypt",
-  "-lntdll",
-  "-o",
-  join(output, artifact),
-]);
+if (windowsHost) {
+  const nodeLibrary = join(cache, "node-x64.lib");
+  await verifiedDownload("win-x64/node.lib", nodeLibrary);
+  run("cl.exe", [
+    "/nologo",
+    "/std:c++17",
+    "/O2",
+    "/EHsc",
+    "/MT",
+    "/LD",
+    `/DNAPI_VERSION=${WINDOWS_NATIVE_ARTIFACT.nodeApiVersion}`,
+    "/D_WIN32_WINNT=0x0A00",
+    `/I${headers}`,
+    `/Fo${output}\\`,
+    "native/windows/src/addon.cc",
+    inspectionFixture
+      ? "tests/fixtures/windows-native-inspection-failure.cc"
+      : "native/windows/src/filesystem.cc",
+    "native/windows/src/process.cc",
+    "/link",
+    `/OUT:${join(output, artifact)}`,
+    `/IMPLIB:${join(output, "rea-windows-x64.lib")}`,
+    "/DELAYLOAD:node.exe",
+    nodeLibrary,
+    "advapi32.lib",
+    "bcrypt.lib",
+    "ntdll.lib",
+    "delayimp.lib",
+  ]);
+} else {
+  run("x86_64-w64-mingw32-dlltool", ["-d", definition, "-y", library]);
+  run(compiler, [
+    "-std=c++17",
+    "-O2",
+    `-DNAPI_VERSION=${WINDOWS_NATIVE_ARTIFACT.nodeApiVersion}`,
+    "-D_WIN32_WINNT=0x0A00",
+    "-shared",
+    "-static",
+    "-static-libgcc",
+    "-static-libstdc++",
+    "-Wl,--no-insert-timestamp",
+    `-I${headers}`,
+    "native/windows/src/addon.cc",
+    inspectionFixture
+      ? "tests/fixtures/windows-native-inspection-failure.cc"
+      : "native/windows/src/filesystem.cc",
+    "native/windows/src/process.cc",
+    library,
+    "-ladvapi32",
+    "-lbcrypt",
+    "-lntdll",
+    "-o",
+    join(output, artifact),
+  ]);
+}
 const packageJson = JSON.parse(
   await readFile(join(root, "package.json"), "utf8"),
 );

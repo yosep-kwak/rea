@@ -11,6 +11,8 @@ import {
 import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import type { AnalysisCleanupObservation } from "../domain/analysisErrorBase.js";
+import type { ArtifactResourceOwner } from "../artifacts/ArtifactResourceScope.js";
+import { acquireWindowsReferenceSourceFileLease } from "./WindowsReferenceSourceFileLease.js";
 
 import {
   entryFailure,
@@ -205,12 +207,19 @@ export const readStableFile = async (
   readonly cleanup?: AnalysisCleanupObservation;
 }> => {
   let owner: OwnedFileHandle | undefined;
+  let nativeOwner: ArtifactResourceOwner | undefined;
   let cleanup: AnalysisCleanupObservation | undefined;
   let entry: ReferenceSourceEntry;
   try {
-    entry = await readStableFileEntry(request, (admitted) => {
-      owner = admitted;
-    });
+    entry = await readStableFileEntry(
+      request,
+      (admitted) => {
+        owner = admitted;
+      },
+      (admitted) => {
+        nativeOwner = admitted;
+      },
+    );
   } finally {
     if (owner !== undefined) {
       const result = await request.resources.release({
@@ -224,6 +233,24 @@ export const readStableFile = async (
           request.absolute,
         );
     }
+    if (nativeOwner !== undefined) {
+      const result = await request.resources.release(nativeOwner);
+      if (result.kind === "failed") {
+        const observed = ArtifactReaderFailure.cleanupObservation(
+          result.cause,
+          request.absolute,
+        );
+        cleanup =
+          cleanup === undefined
+            ? observed
+            : {
+                reason: `${cleanup.reason}; ${observed.reason}`,
+                resources: [
+                  ...new Set([...cleanup.resources, ...observed.resources]),
+                ],
+              };
+      }
+    }
   }
   return { entry, ...(cleanup === undefined ? {} : { cleanup }) };
 };
@@ -231,6 +258,7 @@ export const readStableFile = async (
 const readStableFileEntry = async (
   request: StableFileRequest,
   retain: (owner: OwnedFileHandle) => void,
+  retainNative: (owner: ArtifactResourceOwner) => void,
 ): Promise<ReferenceSourceEntry> => {
   const { root, rootIdentity, absolute, path, expected, signal } = request;
   try {
@@ -248,6 +276,11 @@ const readStableFileEntry = async (
         parentBefore.message,
         safeSize(expected.size),
       );
+    if (process.platform === "win32") {
+      // Native admission rejects reparse components and denies replacement or
+      // writes while the existing descriptor-based read and identity checks run.
+      retainNative(acquireWindowsReferenceSourceFileLease(absolute));
+    }
     const { handle } = await openRegularFile(absolute, {
       symlinks: "reject",
       signal,

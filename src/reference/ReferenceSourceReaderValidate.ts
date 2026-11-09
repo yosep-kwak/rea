@@ -14,6 +14,7 @@ import type {
   ReferenceSourceFailureCode,
   ReferenceSourceResult,
 } from "./ReferenceSourceReaderTypes.js";
+import { systemWindowsNativeAuthority } from "../windows/WindowsNativeLoader.js";
 
 export const bigLstat = (path: string): Promise<BigIntStats> =>
   lstat(path, { bigint: true });
@@ -29,7 +30,8 @@ export const isAborted = (signal?: AbortSignal): boolean =>
   signal?.aborted === true;
 
 export const noFollowOpenSupported = (): boolean =>
-  Number.isSafeInteger(constants.O_NOFOLLOW) && constants.O_NOFOLLOW !== 0;
+  (Number.isSafeInteger(constants.O_NOFOLLOW) && constants.O_NOFOLLOW !== 0) ||
+  (process.platform === "win32" && systemWindowsNativeAuthority().available);
 
 export const validateDirectory = async (
   root: string,

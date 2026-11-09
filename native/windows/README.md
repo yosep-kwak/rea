@@ -10,16 +10,26 @@ There is no environment override for loading an arbitrary native module.
 
 ## Build
 
-The artifact lane requires Linux, MinGW-w64 `x86_64-w64-mingw32-g++`,
-`x86_64-w64-mingw32-dlltool`, and `tar`. It never installs these commands.
+The artifact lane supports Linux with MinGW-w64 `x86_64-w64-mingw32-g++`,
+`x86_64-w64-mingw32-dlltool`, and `tar`, or Windows x64 with installed Visual
+Studio C++ x64 tools and `tar`. It never installs these commands. On Windows,
+`vswhere` selects the installed C++ toolchain and its environment is confined
+to build subprocesses; no global PATH or settings are changed.
 Node-API headers are reused from the build cache or downloaded from the
-pinned official Node release with its published SHA-256 checked.
+pinned official Node release with its published SHA-256 checked. The Windows
+lane also verifies that release's x64 import library before linking.
 
 ```sh
 npm run build:windows-native
 npm run verify:windows-native:artifact
 npm pack
 ```
+
+Close REA processes using the addon before rebuilding: Windows cannot replace
+a loaded DLL. After source updates adding native operations, rebuild from the
+matching source; a published artifact with the same package version may still
+predate those unreleased operations. Run `verify:windows-native` on Windows
+to check the actual artifact's filesystem and process ownership controls.
 
 `build/` is ignored by Git. The npm file inventory includes only the addon and
 its manifest. Release CI builds both, and `prepublishOnly` rejects a missing,

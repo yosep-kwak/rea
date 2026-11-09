@@ -978,9 +978,12 @@ the inventoried `to` path; distinct query/fragment requests remain distinct even
 when they name the same file. CommonJS requests retain literal filename semantics
 for percent signs, query marks and fragments.
 
-Historical-source import requires safe no-follow file opens on Linux or
-macOS. Native Windows returns `unsupported_host`; use Linux REA inside WSL
-or another supported host. See
+Historical-source import uses safe no-follow file opens on Linux or macOS.
+Windows x64 uses the verified packaged native controls on fixed local NTFS
+volumes: file reads retain native handles that reject reparse components and
+deny replacement or writes until descriptor reads and identity checks settle.
+Directory junction targets are not followed. Missing native controls or
+unsupported filesystems remain explicit failures. See
 [source-to-bundle comparison](../guides/javascript/javascript-application-workflows.md#historical-source-to-bundle-comparison)
 for mapping identities, inferences and unknowns.
 
