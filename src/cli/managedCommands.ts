@@ -1,4 +1,8 @@
-import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
+import { createHash } from "node:crypto";
+import {
+  isObject,
+  projectCliAnalysisResult,
+} from "./projectCliAnalysisResult.js";
 import { z } from "incur";
 
 import { compareManagedMemberPaths } from "../application/managed/ManagedMemberComparisonService.js";
@@ -19,9 +23,87 @@ import type { Logger } from "pino";
 import type { CliInstance } from "./types.js";
 import { registerProjectManagedApplicationGraph } from "./managedProjectGraphCommand.js";
 import { managedMembersInputSchema } from "../contracts/managed/managedToolContracts.js";
-import { localPathStringSchema } from "../domain/localPath.js";
+import {
+  absoluteLocalPathStringSchema,
+  localPathStringSchema,
+} from "../domain/localPath.js";
 import { withCommandCancellation } from "./commandCancellation.js";
 import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
+import { writeTextParts } from "../application/JsonFiles.js";
+import { bufferedJsonParts } from "../domain/jsonSerialization.js";
+import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
+import type { Evidence } from "../domain/evidence.js";
+import type { JsonValue } from "../domain/jsonValue.js";
+import type { Result } from "../domain/result.js";
+import { jsonOutputParts } from "./jsonOutput.js";
+
+const managedOutputFileOption = absoluteLocalPathStringSchema
+  .optional()
+  .describe(
+    "Write this command's Evidence JSON to a new absolute file and return a compact receipt; never replaces an existing path",
+  );
+
+const deliverManagedOutput = async (
+  result: Result<Evidence, JsonValue>,
+  outputPath: string | undefined,
+  signal: AbortSignal,
+) => {
+  if (!result.ok || outputPath === undefined)
+    return projectCliAnalysisResult(result);
+
+  const evidence = result.value;
+  const hash = createHash("sha256");
+  function* outputParts() {
+    for (const part of bufferedJsonParts(
+      jsonOutputParts(evidence, "json", false),
+    )) {
+      hash.update(part);
+      yield part;
+    }
+  }
+  const resources = new ArtifactResourceScope();
+  const written = await writeTextParts(
+    outputParts(),
+    outputPath,
+    false,
+    resources,
+    {
+      signal,
+      operation: evidence.operation,
+    },
+  );
+  if (!written.ok) {
+    await resources.close().catch(() => undefined);
+    return {
+      error: "Managed Evidence output failed",
+      ...projectAnalysisError(written.error, "invocation"),
+    };
+  }
+
+  const normalized = evidence.normalized_result;
+  const coverageOwner =
+    isObject(normalized) &&
+    normalized.kind === "summary" &&
+    normalized.parent_operation === "inspect_managed_members"
+      ? normalized.summary
+      : normalized;
+  const coverage = isObject(coverageOwner) ? coverageOwner.coverage : undefined;
+  return {
+    kind: "managed-evidence-file",
+    ...written.value,
+    sha256: hash.digest("hex"),
+    evidence_id: evidence.evidence_id,
+    operation: evidence.operation,
+    coverage: isObject(coverage)
+      ? {
+          state: coverage.state ?? null,
+          issue_count: Array.isArray(coverage.issues)
+            ? coverage.issues.length
+            : null,
+        }
+      : { state: null, issue_count: null },
+  };
+};
 
 export const registerManagedCommands = (
   cli: CliInstance,
@@ -49,14 +131,20 @@ const registerInspectManagedArtifact = (
         "Managed PE executable or assembly path",
       ),
     }),
-    run: ({ args }) =>
-      logCliCommand(logger, "inspect-managed-artifact", () =>
-        runProviderAnalysis(
-          args.path,
-          "inspect_managed_artifact",
-          {},
-          logger,
-        ).then(projectCliAnalysisResult),
+    options: z.object({ outputFile: managedOutputFileOption }),
+    run: ({ args, options }) =>
+      withCommandCancellation((signal) =>
+        logCliCommand(logger, "inspect-managed-artifact", () =>
+          runProviderAnalysis(
+            args.path,
+            "inspect_managed_artifact",
+            {},
+            logger,
+            signal,
+          ).then((result) =>
+            deliverManagedOutput(result, options.outputFile, signal),
+          ),
+        ),
       ),
   });
 };
@@ -75,6 +163,7 @@ const registerInspectManagedMembers = (
       ),
     }),
     options: z.object({
+      outputFile: managedOutputFileOption,
       type: managedMembersInputSchema.shape.type_names.describe(
         "Inspect only members declared by this exact type full name, and the string literals they load, such as System.Threading.Monitor; a nested type is named by its bare name, which selects every nested type of that name (repeatable)",
       ),
@@ -104,7 +193,9 @@ const registerInspectManagedMembers = (
                 ? {}
                 : { evidenceBundlePath: options.evidenceBundle }),
             },
-          ).then(projectCliAnalysisResult),
+          ).then((result) =>
+            deliverManagedOutput(result, options.outputFile, signal),
+          ),
         ),
       ),
   });
@@ -123,14 +214,20 @@ const registerInspectManagedNativeBoundaries = (
         "Managed PE executable or assembly path",
       ),
     }),
-    run: ({ args }) =>
-      logCliCommand(logger, "inspect-managed-native-boundaries", () =>
-        runProviderAnalysis(
-          args.path,
-          "inspect_managed_native_boundaries",
-          {},
-          logger,
-        ).then(projectCliAnalysisResult),
+    options: z.object({ outputFile: managedOutputFileOption }),
+    run: ({ args, options }) =>
+      withCommandCancellation((signal) =>
+        logCliCommand(logger, "inspect-managed-native-boundaries", () =>
+          runProviderAnalysis(
+            args.path,
+            "inspect_managed_native_boundaries",
+            {},
+            logger,
+            signal,
+          ).then((result) =>
+            deliverManagedOutput(result, options.outputFile, signal),
+          ),
+        ),
       ),
   });
 };

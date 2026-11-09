@@ -212,7 +212,10 @@ analysis engine:
 rea inspect-managed-artifact /absolute/path/Assembly.dll --json
 rea inspect-managed-members /absolute/path/Assembly.dll --json
 rea inspect-managed-members /absolute/path/Assembly.dll --type Example.Parser --json
+rea inspect-managed-members /absolute/path/Assembly.dll --type Example.Parser --output-file /absolute/path/members.json --json
 ```
+
+`--output-file` is available on all three `inspect-managed-*` commands. It writes the selected Evidence as JSON to a new absolute file and returns its path, byte count, SHA-256, Evidence ID, and observed coverage state. Existing files are refused. The option changes delivery only. Managed analysis limits still apply, and failures keep their original CLI error. `--evidence-bundle` remains the separate way to retain parent Evidence for later views, including when `--detail summary` is selected.
 
 Replace `Example.Parser` with an exact `full_name` from the member inspection,
 or a declaring type name you already know. Omit `--type` to inspect all members,
