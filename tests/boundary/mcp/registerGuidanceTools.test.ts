@@ -1,4 +1,5 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
+import { Ajv2020, type AnySchema } from "ajv/dist/2020.js";
 import { afterEach, expect, it } from "vitest";
 import { ArtifactResourceScope } from "../../../src/artifacts/ArtifactResourceScope.js";
 import {
@@ -19,10 +20,6 @@ const guidanceOutput = <T>(
   schema: { parse(value: unknown): T },
   value: unknown,
 ): T => {
-  // MCP's legacy output-schema projection wraps root-level union schemas.
-  // Newer transports pass the object unchanged.
-  if (typeof value === "object" && value !== null && "result" in value)
-    return schema.parse(value.result);
   return schema.parse(value);
 };
 afterEach(async () => {
@@ -57,6 +54,16 @@ it("advertises strict provider-free contracts and returns packaged guide results
   expect(listed.tools.map(({ name }) => name)).toEqual(
     expect.arrayContaining(["search_guidance", "read_guidance_section"]),
   );
+  const validateOutput = (name: string, value: unknown) => {
+    const schema = listed.tools.find(
+      (tool) => tool.name === name,
+    )?.outputSchema;
+    expect(schema).toBeDefined();
+    const validate = new Ajv2020({ strict: false }).compile(
+      schema as AnySchema,
+    );
+    expect(validate(value), JSON.stringify(validate.errors)).toBe(true);
+  };
   expect(
     searchGuidanceInputSchema.safeParse({
       query: "module",
@@ -78,6 +85,7 @@ it("advertises strict provider-free contracts and returns packaged guide results
     arguments: { query: "exact JavaScript module" },
   });
   expect(response.isError).not.toBe(true);
+  validateOutput("search_guidance", response.structuredContent);
   const parsed = guidanceOutput(
     searchGuidanceOutputSchema,
     response.structuredContent,
@@ -96,6 +104,7 @@ it("advertises strict provider-free contracts and returns packaged guide results
     arguments: { locator: selected?.locator },
   });
   expect(section.isError).not.toBe(true);
+  validateOutput("read_guidance_section", section.structuredContent);
   expect(
     guidanceOutput(readGuidanceSectionOutputSchema, section.structuredContent),
   ).toMatchObject({
@@ -124,4 +133,32 @@ it("advertises strict provider-free contracts and returns packaged guide results
   expect(
     guidanceOutput(searchGuidanceOutputSchema, nextPage.structuredContent),
   ).toMatchObject({ status: "matches", offset: 1 });
+  validateOutput("search_guidance", nextPage.structuredContent);
+  const absent = await client.callTool({
+    name: "search_guidance",
+    arguments: { query: "absentguidanceword5837294" },
+  });
+  expect(absent.isError).not.toBe(true);
+  expect(absent.structuredContent).toMatchObject({ status: "no_matches" });
+  validateOutput("search_guidance", absent.structuredContent);
+  const staleLocator =
+    "rea-guide-v1." +
+    Buffer.from(
+      JSON.stringify({
+        ...JSON.parse(
+          Buffer.from(
+            selected!.locator.slice("rea-guide-v1.".length),
+            "base64url",
+          ).toString(),
+        ),
+        bundle: "0".repeat(64),
+      }),
+    ).toString("base64url");
+  const stale = await client.callTool({
+    name: "read_guidance_section",
+    arguments: { locator: staleLocator },
+  });
+  expect(stale.isError).not.toBe(true);
+  expect(stale.structuredContent).toMatchObject({ status: "stale_locator" });
+  validateOutput("read_guidance_section", stale.structuredContent);
 });
