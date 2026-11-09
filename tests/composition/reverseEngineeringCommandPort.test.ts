@@ -1,15 +1,146 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { expect, it, vi } from "vitest";
 
 import { ReverseEngineeringService } from "../../src/application/reverse/ReverseEngineeringService.js";
+import { createReverseEngineeringCommandPort } from "../../src/composition/reverseEngineering.js";
 import { analysisErrorProjectionSchema } from "../../src/contracts/errorSchemas.js";
 import { projectAnalysisError } from "../../src/domain/analysisErrorProjection.js";
 import { execFileOutput } from "../../src/process/ExecFileOutput.js";
+import { createWindowsObjdumpInput } from "../../src/objdump/WindowsObjdumpInput.js";
 
 type ExecFileOutputOptions = NonNullable<Parameters<typeof execFileOutput>[2]>;
+
+it.skipIf(process.platform !== "win32")(
+  "rejects changed snapshot bytes and relocation of requested DWARF links",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rea-objdump-identity-"));
+    const path = join(directory, "원본.bin");
+    await writeFile(path, "changed since preflight");
+    const input = await createWindowsObjdumpInput(path, ["-f", path], false);
+    try {
+      await expect(input.prepare("a".repeat(64))).rejects.toMatchObject({
+        _tag: "AnalysisArtifactChangedError",
+      });
+      await expect(
+        createWindowsObjdumpInput(path, ["-W", "-WK", path], true),
+      ).rejects.toMatchObject({
+        _tag: "AnalysisCapabilityUnavailableError",
+        remediationAction: expect.stringContaining("follow_debug_links=false"),
+      });
+    } finally {
+      await input.close();
+      await expect(access(input.resources[0]!)).rejects.toThrow();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it.skipIf(process.platform !== "win32")(
+  "admits Unicode objdump filenames to an immutable private ASCII snapshot",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rea-objdump-한글-"));
+    const path = join(directory, "-원본 파일.bin");
+    const bytes = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    await writeFile(path, bytes);
+    let workingPath = "";
+    const run = vi.fn(
+      async (
+        _command: string,
+        args: readonly string[],
+        options?: ExecFileOutputOptions,
+      ) => {
+        expect(args).toEqual(["-f", `./${sha256}.bin`]);
+        workingPath = join(String(options?.cwd), `${sha256}.bin`);
+        expect((await readFile(workingPath)).equals(bytes)).toBe(true);
+        await expect(writeFile(workingPath, "changed")).rejects.toThrow();
+        return { stdout: "owned output", stderr: "" };
+      },
+    );
+    const service = new ReverseEngineeringService({
+      environment: {},
+      commands: createReverseEngineeringCommandPort(
+        { REA_OBJDUMP_COMMAND: "C:\\tools\\objdump.exe" },
+        "win32",
+      ),
+      run,
+    });
+    try {
+      const result = await service.inspectWithObjdump({
+        path,
+        operation: "file_headers",
+      });
+      expect(result.ok).toBe(true);
+      expect(run).toHaveBeenCalledOnce();
+      if (result.ok) {
+        expect(result.value.subject?.local_path).toBe(path);
+        expect(result.value.parameters).toMatchObject({
+          path,
+          command_input: { path: workingPath, sha256 },
+        });
+        expect(result.value.normalized_result).toMatchObject({
+          artifact_changed: false,
+        });
+      }
+      expect((await readFile(path)).equals(bytes)).toBe(true);
+      await expect(access(workingPath)).rejects.toThrow();
+    } finally {
+      await service.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it.skipIf(process.platform !== "win32")(
+  "keeps Unicode Windows directories out of objdump argv while retaining source identity",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rea-objdump-한글-"));
+    const path = join(directory, "-owned.bin");
+    await writeFile(path, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+    const run = vi.fn(
+      async (
+        _command: string,
+        _args: readonly string[],
+        _options?: ExecFileOutputOptions,
+      ) => ({ stdout: "owned output", stderr: "" }),
+    );
+    const service = new ReverseEngineeringService({
+      environment: {},
+      commands: createReverseEngineeringCommandPort(
+        { REA_OBJDUMP_COMMAND: "C:\\tools\\objdump.exe" },
+        "win32",
+      ),
+      run,
+    });
+    try {
+      const result = await service.inspectWithObjdump({
+        path,
+        operation: "file_headers",
+      });
+      expect(result.ok).toBe(true);
+      expect(run.mock.calls[0]?.[1]).toEqual(["-f", "./-owned.bin"]);
+      expect(run.mock.calls[0]?.[2]?.cwd).toBe(directory);
+      if (result.ok) {
+        expect(result.value.subject?.local_path).toBe(path);
+        expect(result.value.parameters).toMatchObject({
+          path,
+          command_cwd: directory,
+          command_arguments: ["-f", "./-owned.bin"],
+        });
+        expect(result.value.normalized_result).toMatchObject({
+          artifact_changed: false,
+        });
+      }
+    } finally {
+      await service.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 it("uses provider profiles supplied through the application port", async () => {
   const directory = await mkdtemp(join(tmpdir(), "rea-reverse-port-"));

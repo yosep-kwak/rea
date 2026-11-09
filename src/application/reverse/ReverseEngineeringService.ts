@@ -35,6 +35,7 @@ import {
 } from "../../domain/reverseEngineering.js";
 import type {
   ReverseEngineeringCommandPort,
+  ReverseEngineeringCommandInput,
   ReverseEngineeringProviderCommand,
 } from "./ReverseEngineeringCommandPort.js";
 import {
@@ -48,6 +49,7 @@ import {
 import type { ProviderProcessSupervisor } from "../../process/ProviderProcess.js";
 import { absoluteCallerPath } from "../../filesystem/callerPath.js";
 import { parseAnalysisInput } from "../AnalysisInput.js";
+import { AnalysisCleanupLease } from "../../artifacts/AnalysisCleanupLease.js";
 
 export type ReverseEngineeringOperation =
   | "inspect_with_objdump"
@@ -112,6 +114,14 @@ export class ReverseEngineeringService {
   readonly #run: ReverseEngineeringCommandRunner;
   readonly #digest: typeof digestFile;
   readonly #stat: (path: string) => Promise<Stats>;
+  readonly #inputs = new Map<
+    ReverseEngineeringCommandInput,
+    {
+      readonly lease: AnalysisCleanupLease;
+      active: boolean;
+      owner?: ProviderProcessSupervisor;
+    }
+  >();
   readonly #pendingCleanup = new Map<
     ProviderProcessSupervisor,
     {
@@ -184,7 +194,40 @@ export class ReverseEngineeringService {
         this.#pendingCleanup.delete(owner);
       }
     }
+    for (const [input, retained] of this.#inputs) {
+      if (retained.active) continue;
+      const released = await this.#releaseInput(input, operation);
+      if (released !== undefined && failure === undefined) failure = released;
+    }
     return failure === undefined ? ok(null) : err(failure);
+  }
+
+  async #releaseInput(
+    input: ReverseEngineeringCommandInput,
+    operation: string,
+  ): Promise<AnalysisError | undefined> {
+    const retained = this.#inputs.get(input);
+    if (retained === undefined) return undefined;
+    try {
+      await retained.lease.release();
+      this.#inputs.delete(input);
+      return undefined;
+    } catch (cause) {
+      const failure = new AnalysisOutputError(
+        operation,
+        "Private command input cleanup remains incomplete.",
+        {
+          cause,
+          cleanup: {
+            reason: cause instanceof Error ? cause.message : String(cause),
+            resources: input.resources,
+          },
+          cleanupOnly: true,
+        },
+      );
+      retained.lease.bindCleanupError(failure);
+      return failure;
+    }
   }
 
   /** Retry cleanup for provider process groups retained after an incomplete stop. */
@@ -358,7 +401,7 @@ export class ReverseEngineeringService {
     signal: AbortSignal | undefined,
     timeoutMs: number,
   ): Promise<Result<Evidence, AnalysisError>> {
-    const { executable: command, arguments: args } = profile;
+    const { executable: command } = profile;
     if (signal?.aborted)
       return err(
         new AnalysisCancelledError(operation, { cause: signal.reason }),
@@ -442,6 +485,122 @@ export class ReverseEngineeringService {
         ),
       );
     }
+    let input: ReverseEngineeringCommandInput | undefined;
+    let observed: Result<Evidence, AnalysisError>;
+    try {
+      let preparedProfile = profile;
+      let preparedParameters = parameters;
+      if (profile.createInput !== undefined && digest !== undefined) {
+        input = await profile.createInput();
+        const selectedInput = input;
+        const retained: {
+          lease: AnalysisCleanupLease;
+          active: boolean;
+          owner?: ProviderProcessSupervisor;
+        } = {
+          active: true,
+          lease: new AnalysisCleanupLease(async () => {
+            if (
+              retained.owner !== undefined &&
+              this.#pendingCleanup.has(retained.owner)
+            )
+              throw new Error(
+                "The provider process still owns this private input.",
+              );
+            await selectedInput.close();
+          }, input.resources),
+        };
+        this.#inputs.set(input, retained);
+        const deadline = AbortSignal.timeout(timeoutMs);
+        const prepareSignal =
+          signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+        let prepared: Awaited<
+          ReturnType<ReverseEngineeringCommandInput["prepare"]>
+        >;
+        try {
+          prepared = await input.prepare(digest, prepareSignal);
+        } catch (cause) {
+          if (signal?.aborted)
+            throw new AnalysisCancelledError(operation, {
+              cause: signal.reason,
+            });
+          if (deadline.aborted)
+            throw new AnalysisTimeoutError(operation, timeoutMs, {
+              cause,
+              ...reverseCommandTimeoutGuidance(timeoutMs),
+            });
+          throw cause;
+        }
+        if (signal?.aborted)
+          throw new AnalysisCancelledError(operation, { cause: signal.reason });
+        if (deadline.aborted)
+          throw new AnalysisTimeoutError(
+            operation,
+            timeoutMs,
+            reverseCommandTimeoutGuidance(timeoutMs),
+          );
+        preparedProfile = {
+          ...profile,
+          arguments: prepared.arguments,
+          cwd: prepared.cwd,
+        };
+        preparedParameters = {
+          ...parameters,
+          command_input: prepared.observation,
+        };
+      }
+      observed = await this.#observeCommand(
+        operation,
+        preparedProfile,
+        absolutePath,
+        digest,
+        preparedParameters,
+        signal,
+        timeoutMs,
+        input,
+      );
+    } catch (cause) {
+      observed = err(
+        cause instanceof AnalysisError
+          ? cause
+          : new ProviderAdapterError(profile.identity.id, operation, {
+              cause,
+              diagnostics: { phase: "command_input" },
+            }),
+      );
+    }
+    if (input !== undefined) {
+      const retained = this.#inputs.get(input);
+      if (retained !== undefined) retained.active = false;
+      const cleanupFailure = await this.#releaseInput(input, operation);
+      if (signal?.aborted && observed.ok)
+        observed = err(
+          new AnalysisCancelledError(operation, {
+            cause: signal.reason,
+          }).retainPartialObservation(observed.value),
+        );
+      if (cleanupFailure !== undefined) {
+        if (observed.ok)
+          return err(cleanupFailure.retainPartialObservation(observed.value));
+        observed.error
+          .retainSecondaryFailure(cleanupFailure)
+          .bindCleanupDependencies([cleanupFailure]);
+      }
+    }
+    return observed;
+  }
+
+  async #observeCommand(
+    operation: ReverseEngineeringOperation,
+    profile: ReverseEngineeringProviderCommand,
+    absolutePath: string | undefined,
+    digest: string | undefined,
+    parameters: Readonly<Record<string, JsonValue>>,
+    signal: AbortSignal | undefined,
+    timeoutMs: number,
+    input: ReverseEngineeringCommandInput | undefined,
+  ): Promise<Result<Evidence, AnalysisError>> {
+    const { executable: command, arguments: args } = profile;
     let stdout = "";
     let stderr = "";
     let stdoutBytes = 0;
@@ -460,6 +619,7 @@ export class ReverseEngineeringService {
     let earlyFailure: AnalysisError | undefined;
     try {
       const output = await this.#run(command, args, {
+        ...(profile.cwd === undefined ? {} : { cwd: profile.cwd }),
         env: {
           ...this.#environment,
           ...profile.environmentOverrides,
@@ -479,6 +639,10 @@ export class ReverseEngineeringService {
     } catch (cause) {
       cleanupOwner =
         cause instanceof OwnedOutputFailure ? cause.cleanupOwner : undefined;
+      const retainedInput =
+        input === undefined ? undefined : this.#inputs.get(input);
+      if (retainedInput !== undefined && cleanupOwner !== undefined)
+        retainedInput.owner = cleanupOwner;
       if (
         cause instanceof OwnedOutputFailure &&
         cause.capabilityError !== undefined
@@ -804,6 +968,7 @@ export class ReverseEngineeringService {
             : parameters),
           provider_executable: command,
           command_arguments: [...args],
+          ...(profile.cwd === undefined ? {} : { command_cwd: profile.cwd }),
         },
         rawResult: result,
         result,
@@ -902,6 +1067,7 @@ const runOwnedCommandOutput =
         {
           command,
           arguments: [...args],
+          ...(typeof options.cwd === "string" ? { cwd: options.cwd } : {}),
           runId: randomUUID(),
           expectedCommand: null,
           env: spawnEnv,

@@ -29,6 +29,19 @@ for target-free architecture listing. Artifact admission keeps separate input
 and filesystem-read diagnostics. Invalid operation/selector combinations retain
 their rejected fields in input issues before artifact reads or provider launch.
 
+On Windows, REA passes Unicode directories through the native working-directory
+field and uses an ASCII basename in objdump's argument list. A non-ASCII basename
+requires a private native snapshot: the copied bytes must match the source's
+preflight SHA-256, and the native owner prevents writes to that copy until the
+provider stops. Evidence keeps the original subject and path, plus the actual
+`command_cwd`, arguments and `command_input` path, digest and admission identities.
+Snapshot creation receives the selected `command_timeout_ms` budget. Cleanup
+failures retain the private owner for retry. This requires REA's Windows native
+private-runtime authority; no ordinary shared temporary copy is used as fallback.
+Relative external inputs are not copied. In particular, `follow_debug_links=true`
+is rejected for a non-ASCII basename because relocation cannot preserve the
+requested local DWARF link resolution; `false` still inspects the file's own data.
+
 For DWARF, REA does not follow local debug links by default. Set `follow_debug_links` to `true` to pass `-WK`; external debug-file identities are not bound to Evidence when following links is enabled. The CLI flag is `--follow-debug-links`; `--no-follow-debug-links` or `--follow-debug-links=false` keeps the default. A separate `true` or `false` word after the flag is not its value. REA clears `DEBUGINFOD_URLS` in the objdump child environment to disable debuginfod network access on GNU binutils versions that do not support `-WE`. The complete raw output is authoritative; REA does not normalize it into a version-independent disassembly schema.
 
 For a known native symbol, use `operation: "disassemble", symbol: "my_function"` in MCP or `--symbol my_function` in CLI. REA passes `--disassemble=my_function` to objdump before collecting output, rather than producing the whole disassembly and filtering it afterward. Omit `symbol` to keep full code-section disassembly. Other operations reject this selector. Use a nonempty, NUL-free name with well-formed Unicode; unsupported values are rejected before reading the artifact or starting objdump. Symbol names are passed unchanged; matching, versioned symbols, aliases and the end of the disassembly follow the selected executable's semantics. Evidence records the selector and actual arguments. An empty match does not establish artifact-wide absence, and the selected observation does not contain the omitted disassembly; request the complete operation when needed.
