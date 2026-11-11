@@ -463,10 +463,13 @@ describe("IL2CPP generic-container linking facts", () => {
       const { link } = readIl2cppMetadataForLinking(fixture.bytes);
       expect(link.genericTypeArgumentCounts[3]).toBe(1);
       expect(link.methodGenericContainer(4)).toBe(2);
-      expect(link.typeGenericContainer(3)).toBe(version === 39 ? undefined : 0);
-      expect(link.genericContainer(0)).toEqual(
-        version === 39 ? undefined : { count: 1, parameterStart: 0 },
-      );
+      expect(link.typeGenericContainer(3)).toBe(0);
+      expect(link.genericContainer(0)).toEqual({
+        count: 1,
+        parameterStart: 0,
+        ownerIndex: 3,
+        isMethod: 0,
+      });
       expect(link.typeGenericContainer(-1)).toBeUndefined();
       expect(link.genericContainer(-1)).toBeUndefined();
     },

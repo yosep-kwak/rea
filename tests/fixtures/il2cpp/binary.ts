@@ -54,6 +54,8 @@ export interface Il2cppBinaryFixtureOptions {
 export interface GenericMethodFixtureOptions {
   /** 16 writes the 27.1+ layout (genericAdjustorThunks); 12 the 27.0 layout. */
   readonly stride?: 12 | 16;
+  /** 120 is the CodeRegistration layout with three unresolved-call arrays. */
+  readonly modulesOffset?: 104 | 120;
   /** Omit CodeRegistration's generic fields, leaving no layout to agree. */
   readonly codeRegistration?: boolean;
   /** methodIndex of row 0; 3 or more is past genericMethodPointersCount. */
@@ -364,7 +366,8 @@ const writeGenericMethods = (
   if (options.codeRegistration === false) return;
   // CodeRegistration ends at codeGenModulesCount (REGISTRATION): 104 bytes
   // before it in the 27.1+ layout, 96 in the 27.0 layout.
-  const start = REGISTRATION - (stride === 16 ? 104 : 96);
+  const start =
+    REGISTRATION - (options.modulesOffset ?? (stride === 16 ? 104 : 96));
   const codeWord = (offset: number, value: bigint) =>
     bytes.writeBigUInt64LE(value, start + offset);
   // A build without generic instances records no pointers and a null array,

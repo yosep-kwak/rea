@@ -962,12 +962,17 @@ export interface Il2cppMetadataLinkFacts {
   readonly methodGenericContainer: (index: number) => number | undefined;
   /**
    * Demand-read argument count and first GenericParameterIndex of a generic
-   * container; undefined out of range and for the counted (version 39)
-   * layout, whose container records are not decoded.
+   * container; undefined out of range. Counted metadata compresses the
+   * references to containers, but the container rows remain 16 bytes.
    */
-  readonly genericContainer: (
-    index: number,
-  ) => { readonly count: number; readonly parameterStart: number } | undefined;
+  readonly genericContainer: (index: number) =>
+    | {
+        readonly count: number;
+        readonly parameterStart: number;
+        readonly ownerIndex: number;
+        readonly isMethod: number;
+      }
+    | undefined;
 }
 
 /** Byte offset of GenericContainerIndex in a method record; the token follows. */
@@ -1000,14 +1005,15 @@ const readGenericContainer = (tables: MetadataTables, index: number) => {
   return {
     count: tables.bytes.readInt32LE(at + 4),
     parameterStart: tables.bytes.readInt32LE(at + 12),
+    ownerIndex: tables.bytes.readInt32LE(at),
+    isMethod: tables.bytes.readInt32LE(at + 8),
   };
 };
 
 /** Type and method container indices and container records, read on demand. */
 const createGenericContainerReaders = (tables: MetadataTables) => {
   const typeCount = tables.counts.typeDefinitions;
-  const containerCount =
-    tables.indexing === "counted" ? 0 : tables.counts.genericContainers;
+  const containerCount = tables.counts.genericContainers;
   const inRange = (index: number, count: number) =>
     Number.isInteger(index) && index >= 0 && index < count;
   const methods = tables.section("methods"),
@@ -1024,7 +1030,7 @@ const createGenericContainerReaders = (tables: MetadataTables) => {
             tables.widths.generic_container,
           ),
     typeGenericContainer: (index: number): number | undefined =>
-      tables.indexing === "counted" || !inRange(index, typeCount)
+      !inRange(index, typeCount)
         ? undefined
         : readTypeGenericContainer(tables, index),
     genericContainer: (index: number) =>

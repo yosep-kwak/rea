@@ -389,7 +389,11 @@ and no byref mark. These names do not depend on the byref bit, so version 27 is
 covered.
 
 Header versions do not separate the CodeRegistration layouts (27.0, 27.1 to
-29 and 29.1/31 differ in the fields before `codeGenModulesCount`). Every layout for the header version is tried, and
+29 and 29.1/31 differ in the fields before `codeGenModulesCount`). Version 39 uses
+the 64-bit CodeRegistration layout with `codeGenModulesCount` at byte 120 and
+16-byte genericMethodTable rows. Its type and method records use packed
+GenericContainerIndex references to fixed 16-byte container rows.
+Every known layout for the header version is tried, and
 exactly one must have a `genericMethodPointers` count and an invoker count that
 bound every table row; the layout also fixes the row size (12 bytes, or 16 with
 an adjustor thunk index). No layout agreeing fails as
@@ -398,7 +402,7 @@ an adjustor thunk index). No layout agreeing fails as
 the result has no rows, and `generic_method_pointers_field`,
 `generic_method_pointers_count` and `generic_method_table_stride` are `null`.
 A table of a few rows can still leave two layouts agreeing, which fails as
-ambiguous rather than picking one. Metadata versions 24 and 39 and builds
+ambiguous rather than picking one. Metadata version 24 and builds
 without a static CodeRegistration (`code_gen_modules_field` `null`) or
 MetadataRegistration (`types_field` `null`) fail as
 `generic-methods-unsupported`: for version 24 the type-definition generic
@@ -408,7 +412,8 @@ real build, so it is refused rather than guessed.
 After the layout is fixed, rows that contradict another table do not fail the
 whole link: a method spec naming a method or generic instance out of range,
 class or method arguments whose count differs from the generic container the
-owner declares (none for a non-generic type or method), an owner whose generic
+owner declares (none for a non-generic type or method), a version 39 container
+that names a different owner, an owner whose generic
 container index is out of range, a name that cannot be rendered, or a pointer slot that is unmapped, has an
 unresolved relocation or points outside unambiguous executable file data adds
 an `issues` entry, and that row is `unknown` with no address. A method spec
@@ -452,25 +457,25 @@ Il2CppType byref flag in different bits, so a rendered name could gain or lose
 
 The builds checked are listed after the module search rules above.
 
-| Reason                                  | Category    | Meaning                                                                                                      |
-| --------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------ |
-| `unsupported-container`                 | unsupported | Not a 64-bit little-endian Mach-O, PE or ELF image (ELF: AArch64 or x86-64 with dynamic section).            |
-| `slice-selection-required`              | unsupported | A universal Mach-O was given without `binary_architecture`.                                                  |
-| `ambiguous-slice-selection`             | unsupported | More than one universal slice matches the selected architecture label; select an exact subtype externally.   |
-| `slice-not-found`                       | unsupported | The requested slice is absent, or a thin binary was given an architecture.                                   |
-| `unsupported-pointer-encoding`          | unsupported | Mach-O chained fixups or Android packed (APS2) ELF relocations; pointers not decoded.                        |
-| `malformed-container`                   | input error | The container headers are damaged.                                                                           |
-| `code-gen-modules-not-found`            | input error | An image has no module record; often a binary from a different build.                                        |
-| `ambiguous-code-gen-module`             | input error | More than one module record matches an image.                                                                |
-| `code-registration-not-found`           | input error | No unique module table or executable-byte array candidate was resolved.                                      |
-| `invalid-method-token`                  | input error | A token is outside its module's method-pointer rows, or a MethodDef row is reused within one image.          |
-| `invalid-method-pointer`                | input error | A slot is unavailable or its nonzero address lacks unambiguous executable file coverage.                     |
-| `metadata-registration-not-found`       | input error | No single MetadataRegistration or code-loaded type-table candidate was resolved.                             |
-| `invalid-type`                          | input error | A type index or `Il2CppType` record is out of range, unmapped or malformed.                                  |
-| `unsupported-type-kind`                 | unsupported | A valid type kind has no implemented rendering.                                                              |
-| `generic-methods-unsupported`           | unsupported | Generic instances were requested for metadata version 24 or 39, or a build lacks either static registration. |
-| `generic-method-registration-not-found` | input error | No CodeRegistration layout bounds every genericMethodTable row, or the generic tables are unreadable.        |
-| `ambiguous-generic-method-registration` | input error | More than one CodeRegistration layout bounds every genericMethodTable row.                                   |
+| Reason                                  | Category    | Meaning                                                                                                    |
+| --------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------- |
+| `unsupported-container`                 | unsupported | Not a 64-bit little-endian Mach-O, PE or ELF image (ELF: AArch64 or x86-64 with dynamic section).          |
+| `slice-selection-required`              | unsupported | A universal Mach-O was given without `binary_architecture`.                                                |
+| `ambiguous-slice-selection`             | unsupported | More than one universal slice matches the selected architecture label; select an exact subtype externally. |
+| `slice-not-found`                       | unsupported | The requested slice is absent, or a thin binary was given an architecture.                                 |
+| `unsupported-pointer-encoding`          | unsupported | Mach-O chained fixups or Android packed (APS2) ELF relocations; pointers not decoded.                      |
+| `malformed-container`                   | input error | The container headers are damaged.                                                                         |
+| `code-gen-modules-not-found`            | input error | An image has no module record; often a binary from a different build.                                      |
+| `ambiguous-code-gen-module`             | input error | More than one module record matches an image.                                                              |
+| `code-registration-not-found`           | input error | No unique module table or executable-byte array candidate was resolved.                                    |
+| `invalid-method-token`                  | input error | A token is outside its module's method-pointer rows, or a MethodDef row is reused within one image.        |
+| `invalid-method-pointer`                | input error | A slot is unavailable or its nonzero address lacks unambiguous executable file coverage.                   |
+| `metadata-registration-not-found`       | input error | No single MetadataRegistration or code-loaded type-table candidate was resolved.                           |
+| `invalid-type`                          | input error | A type index or `Il2CppType` record is out of range, unmapped or malformed.                                |
+| `unsupported-type-kind`                 | unsupported | A valid type kind has no implemented rendering.                                                            |
+| `generic-methods-unsupported`           | unsupported | Generic instances were requested for metadata version 24, or a build lacks either static registration.     |
+| `generic-method-registration-not-found` | input error | No CodeRegistration layout bounds every genericMethodTable row, or the generic tables are unreadable.      |
+| `ambiguous-generic-method-registration` | input error | More than one CodeRegistration layout bounds every genericMethodTable row.                                 |
 
 Format and selection failures name `binary_path`; capacity refusals remain typed resource errors. Failed linking preserves the metadata source identity, validated counts, selected binary path/architecture and its SHA-256 when observed, plus prior producer observations. It never publishes an incomplete native table as complete. The binary input is bounded to 1 GiB.
 
@@ -585,7 +590,7 @@ report limit can still require the summary and paging path.
 - Decrypting or deobfuscating protected metadata.
 - Linking Mach-O binaries that use chained fixups, ELF images with Android
   packed (APS2) relocations, and 32-bit images; adjustor thunks and invokers;
-  generic method instances for metadata versions 24 and 39 or builds without a static
+  generic method instances for metadata version 24 or builds without a static
   CodeRegistration.
 - Full method signatures beyond the rendered field, parameter and return type
   names, and type names for metadata version 27.

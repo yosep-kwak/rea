@@ -53,7 +53,8 @@ export interface Il2cppGenericMethodLink {
  * versions do not separate these minor versions, so every listed layout is
  * tried and exactly one must agree with the tables. Version 24 is left out:
  * its type-definition container offset and generic class layout are unchecked
- * against a real build. Version 39 container records are not decoded.
+ * against a real build. Version 39 puts codeGenModulesCount at byte 120
+ * on 64-bit targets and uses 16-byte generic rows (Unity 6000.3 headers).
  */
 const CODE_REGISTRATION_LAYOUTS: Readonly<
   Record<
@@ -73,6 +74,7 @@ const CODE_REGISTRATION_LAYOUTS: Readonly<
     { modules: 104, stride: 16 },
     { modules: 120, stride: 16 },
   ],
+  39: [{ modules: 120, stride: 16 }],
 };
 
 /** Refuse an undecoded version before any binary table is read. */
@@ -121,6 +123,13 @@ export function* linkGenericMethodsSteps(
     );
   const word = (address: bigint) => readPointer(image, address);
   const count = (address: bigint) => {
+    if (version === 39) {
+      // v39 registers int32/uint32 counts with separate pointer alignment padding.
+      const value = readUInt32(image, address);
+      return typeof value === "number" && value <= GENERIC_TABLE_LIMIT
+        ? value
+        : null;
+    }
     const value = word(address);
     return value === null || value > BigInt(GENERIC_TABLE_LIMIT)
       ? null
@@ -271,10 +280,23 @@ export function* linkGenericMethodsSteps(
     container: number | undefined,
     instance: bigint | null,
   ) => {
-    if (instance === null || container === undefined) return null;
+    if (container === undefined) return null;
+    const entry =
+      container === -1 ? undefined : facts.genericContainer(container);
+    if (version === 39 && container !== -1) {
+      if (entry === undefined)
+        return `names ${kind} ${owner}, but its generic container ${container} is out of range`;
+      if (
+        entry.ownerIndex !== owner ||
+        entry.isMethod !== (kind === "method" ? 1 : 0)
+      )
+        return `names ${kind} ${owner}, but generic container ${container} belongs to ${entry.isMethod === 1 ? "method" : entry.isMethod === 0 ? "type" : "invalid owner"} ${entry.ownerIndex}`;
+      if (entry.count <= 0)
+        return `names ${kind} ${owner}, but generic container ${container} declares ${entry.count} parameters`;
+    }
+    if (instance === null) return null;
     const given = readUInt32(image, instance);
-    const declared =
-      container === -1 ? 0 : facts.genericContainer(container)?.count;
+    const declared = container === -1 ? 0 : entry?.count;
     // An unread or loader-unresolved count is left to the namer, which
     // refuses it with its own message.
     if (typeof given !== "number" || given === declared) return null;

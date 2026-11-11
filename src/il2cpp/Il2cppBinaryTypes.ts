@@ -401,6 +401,10 @@ export const createMethodSpecNamer = (
     const entry =
       facts.genericContainer(container) ??
       tools.fail(`generic container ${container} is out of range`);
+    if (version === 39 && (entry.isMethod !== 0 || entry.ownerIndex !== index))
+      tools.fail(
+        `generic container ${container} does not belong to type definition ${index}`,
+      );
     if (entry.count <= 0)
       tools.fail(
         `generic container ${container} has ${entry.count} parameters`,

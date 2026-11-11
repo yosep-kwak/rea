@@ -1358,6 +1358,88 @@ it("links generic method instances only when asked", () => {
   });
 });
 
+it("links v39's counted metadata containers and 120-byte CodeRegistration", () => {
+  const linked = linkGeneric({ modulesOffset: 120 }, 39).generic_methods;
+  expect(linked).toMatchObject({
+    generic_method_pointers_field: FIXTURE_BINARY_BASE + 0x600n - 120n + 16n,
+    generic_method_table_stride: 16,
+    instances: FIXTURE_GENERIC_INSTANCES,
+    issues: [],
+  });
+  expect(genericFailure({ modulesOffset: 104 }, 39).reason).toBe(
+    "generic-method-registration-not-found",
+  );
+});
+
+it("validates a v39 method container even without a method instance", () => {
+  const fixture = createIl2cppMetadataFixture({
+    version: 39,
+    genericOwners: true,
+  });
+  fixture.bytes.writeUInt8(99, fixture.record("methods", 3) + 11);
+  const { metadata, link } = readIl2cppMetadataForLinking(fixture.bytes);
+  const binary = createIl2cppBinaryFixture({
+    genericMethods: { modulesOffset: 120 },
+  });
+  const generic = linkIl2cppBinary(binary, metadata, link, undefined, {
+    genericInstances: true,
+  }).generic_methods!;
+  expect(generic.instances[0]).toMatchObject({
+    method: 3,
+    name: null,
+    ...unknownRow,
+  });
+  expect(generic.instances.slice(1)).toEqual(
+    FIXTURE_GENERIC_INSTANCES.slice(1),
+  );
+  expect(generic.issues[0]?.message).toContain("container 99 is out of range");
+});
+
+it("preserves siblings when a v39 method spec's container names a different owner", () => {
+  const fixture = createIl2cppMetadataFixture({
+    version: 39,
+    genericOwners: true,
+  });
+  const containers = fixture.bytes.readInt32LE(
+    fixture.header("genericContainers", "offset"),
+  );
+  fixture.bytes.writeInt32LE(3, containers + 2 * 16); // container 2 is owned by method 4
+  const { metadata: decoded, link } = readIl2cppMetadataForLinking(
+    fixture.bytes,
+  );
+  const binary = createIl2cppBinaryFixture({
+    genericMethods: { modulesOffset: 120 },
+  });
+  const generic = linkIl2cppBinary(binary, decoded, link, undefined, {
+    genericInstances: true,
+  }).generic_methods!;
+  expect(generic.instances.slice(0, 2)).toEqual(
+    FIXTURE_GENERIC_INSTANCES.slice(0, 2),
+  );
+  expect(generic.instances[2]).toMatchObject({
+    method: 4,
+    name: null,
+    ...unknownRow,
+  });
+  expect(generic.issues).toEqual([
+    expect.objectContaining({
+      row: 2,
+      message: expect.stringContaining(
+        "generic container 2 belongs to method 3",
+      ),
+    }),
+  ]);
+});
+
+it("reads a v39 genericMethodPointersCount without its ABI padding", () => {
+  const options = { modulesOffset: 120 } as const;
+  const bytes = createIl2cppBinaryFixture({ genericMethods: options });
+  bytes.writeUInt8(0xff, 0x600 - options.modulesOffset + 20);
+  expect(linkGeneric(options, 39, bytes).generic_methods?.instances).toEqual(
+    FIXTURE_GENERIC_INSTANCES,
+  );
+});
+
 it("admits every generic row and issue before retention", () => {
   const decoded = genericFacts(31);
   const rows: Readonly<Record<string, unknown>>[] = [];
@@ -1507,7 +1589,6 @@ it.each<
     "generic-methods-unsupported",
     "unsupported",
   ],
-  ["metadata version 39", {}, 39, "generic-methods-unsupported", "unsupported"],
 ])("refuses generic linking for %s", (_, options, version, reason, kind) => {
   expect(genericFailure(options, version)).toEqual({ reason, kind });
 });
