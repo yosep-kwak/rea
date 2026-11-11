@@ -2,6 +2,7 @@ import type { Il2cppMetadata } from "../domain/il2cpp/il2cppMetadata.js";
 import {
   checkRange,
   checkedSectionCount,
+  metadataTokenFact,
   readIndex,
   Il2cppMetadataFormatFailure,
 } from "./Il2cppMetadataFormat.js";
@@ -96,7 +97,7 @@ function* readNamed<
   tables: MetadataTables,
   name: "fields" | "properties" | "events" | "parameters",
   ranges: readonly MetadataOwnerRange[],
-  makeRow: (name: string, owner: number) => T,
+  makeRow: (name: string, owner: number, recordAt: number) => T,
 ): Generator<void, T[]> {
   const section = tables.section(name),
     total = tables.members.counts[name];
@@ -104,14 +105,11 @@ function* readNamed<
     rows: T[] = [];
   for (let index = 0; index < total; index++) {
     if (index % 256 === 0) yield;
+    const at = section.offset + index * tables.members.recordBytes[name];
     const row = makeRow(
-      tables.readString(
-        tables.bytes.readInt32LE(
-          section.offset + index * tables.members.recordBytes[name],
-        ),
-        `${name} ${index} name`,
-      ),
+      tables.readString(tables.bytes.readInt32LE(at), `${name} ${index} name`),
       owners[index]!,
+      at,
     );
     if (
       tables.linkFacts !== undefined &&
@@ -123,9 +121,7 @@ function* readNamed<
           : tables.linkFacts.parameterTypes;
       column[index] = readIndex(
         tables.bytes,
-        section.offset +
-          index * tables.members.recordBytes[name] +
-          (name === "fields" ? 4 : 8),
+        at + (name === "fields" ? 4 : 8),
         tables.widths.type,
       );
     }
@@ -199,7 +195,24 @@ export function* readIl2cppMembers(
     name,
     declaring_type,
   });
-  const fields = yield* readNamed(tables, "fields", owners.fields, member);
+  const fields = yield* readNamed(
+    tables,
+    "fields",
+    owners.fields,
+    (name, owner, at) => {
+      const tokenAt = at + 4 + tables.widths.type;
+      return {
+        ...member(name, owner),
+        ...(tables.assemblyCount === undefined
+          ? {}
+          : metadataTokenFact(
+              tables.bytes.readUInt32LE(tokenAt),
+              tokenAt,
+              0x04,
+            )),
+      };
+    },
+  );
   const properties = yield* readNamed(
     tables,
     "properties",

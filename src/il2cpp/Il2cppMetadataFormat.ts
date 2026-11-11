@@ -12,6 +12,9 @@ export const IL2CPP_METADATA_FAILURE_REASONS = {
     "nested-type-conflict",
     "declaring-type-mismatch",
     "image-range-overlap",
+    "metadata-owner-mismatch",
+    "invalid-metadata-token",
+    "duplicate-metadata-token",
     "invalid-string",
   ],
 } as const;
@@ -37,6 +40,23 @@ export class Il2cppMetadataFormatFailure extends Error {
       : "corrupt";
   }
 }
+
+export const metadataTokenFact = (
+  token: number,
+  source_offset: number,
+  table?: number,
+) => {
+  const hex = `0x${token.toString(16).padStart(8, "0")}`;
+  if (
+    table !== undefined &&
+    (token >>> 24 !== table || (token & 0x00ffffff) === 0)
+  )
+    throw new Il2cppMetadataFormatFailure(
+      "invalid-metadata-token",
+      `token ${hex} at byte ${source_offset} is not a nonzero RID in table 0x${table.toString(16).padStart(2, "0")}`,
+    );
+  return { token: hex, source_offset };
+};
 
 /** Validate a section against a known serialized record width once. */
 export const checkedSectionCount = (

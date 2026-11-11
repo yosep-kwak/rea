@@ -3,7 +3,7 @@ import { isSelectedRegularFileError } from "../filesystem/RegularFile.js";
 import { Il2cppBinaryFormatFailure } from "./Il2cppBinaryFormat.js";
 import { Il2cppMetadataFormatFailure } from "./Il2cppMetadataFormat.js";
 import type { AnalysisPartialObservation } from "../domain/analysisErrorBase.js";
-import { jsonValueSchema } from "../domain/jsonValue.js";
+import { jsonValueSchema, ownedJsonValueSchema } from "../domain/jsonValue.js";
 import { setImmediate } from "node:timers/promises";
 import {
   readStableArtifact,
@@ -574,6 +574,11 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
           artifact,
           limitations: [
             "Only unencrypted global-metadata.dat versions 24, 27, 29, 31 and 39 are decoded; names, counts and string literals are observed file content, not runtime behavior.",
+            ...(decoded.assemblies === undefined
+              ? [
+                  "Assembly identity and public declaration tokens are unavailable for this metadata layout.",
+                ]
+              : []),
             binaryPath === undefined
               ? "Native code addresses and IL2CPP binary registration are not recovered without binary_path."
               : `Method addresses come from the binary's code-generation module methodPointers, matched by module name, method count and metadata token; ${input.generic_instances === true ? "" : "generic method instances (see generic_instances), "}adjustor thunks and invokers are not linked, no-body means an observed zero slot, and unknown means no module claimed the method or its slot has an unresolved relocation.`,
@@ -606,7 +611,9 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
             "declaring_type for types is derived from the nestedTypes section, and member and parameter owners from the owners' index ranges; row positions are the metadata indices.",
           ],
         };
-        if (jsonValueByteLength(report, limit) > limit)
+        if (
+          jsonValueByteLength(ownedJsonValueSchema.parse(report), limit) > limit
+        )
           throw reportLimit(input.path, limit);
         const parsed = il2cppMetadataSchema.safeParse(report);
         if (!parsed.success)

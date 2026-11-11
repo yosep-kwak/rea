@@ -1,11 +1,14 @@
 import {
   checkRange,
   checkedSectionCount,
+  metadataTokenFact,
   readIndex,
   Il2cppMetadataFormatFailure,
 } from "./Il2cppMetadataFormat.js";
 import {
   IL2CPP_METADATA_VERSIONS,
+  il2cppModuleTokenPattern,
+  isIl2cppGeneratedAssemblyIdentity,
   il2cppMetadataSectionNames,
   type Il2cppMetadata,
   type Il2cppMetadataSection,
@@ -20,6 +23,8 @@ import {
 } from "./Il2cppMetadataMembers.js";
 
 const NESTED_TYPE_ENTRY_BYTES = 4;
+// Unity 6000.3.15f1 GlobalMetadataFileInternals.h and BuildIl2CppAssembly.
+const V39_ASSEMBLY_RECORD_BYTES = 68;
 
 type SectionName = IL2cppMetadataSectionName;
 type IndexWidth = 1 | 2 | 4;
@@ -390,6 +395,7 @@ export interface MetadataTables {
   readonly counts: ReturnType<typeof recordCounts>;
   readonly typeDefinitionTypeIndices: number;
   readonly indexing: "fixed" | "counted";
+  readonly assemblyCount: number | undefined;
   readonly methodReturnParameterToken: boolean;
   readonly readString: ReturnType<typeof createStringReader>;
   readonly members: ReturnType<typeof readIl2cppMemberTables>;
@@ -405,6 +411,7 @@ function* readImages({
   recordBytes: sizes,
   counts,
   readString,
+  assemblyCount,
   onRow,
 }: MetadataTables): Generator<void, Il2cppMetadataDecoded["images"]> {
   const images = section("images");
@@ -414,10 +421,17 @@ function* readImages({
   for (let index = 0; index < counts.images; index++) {
     if (index % 256 === 0) yield;
     const at = images.offset + index * sizes.images;
+    const tokenAt = at + 20 + 2 * width;
     const image = {
       name: readString(bytes.readInt32LE(at), `image ${index} name`),
       type_start: readIndex(bytes, at + 8, width),
       type_count: bytes.readUInt32LE(at + 8 + width),
+      ...(assemblyCount === undefined
+        ? {}
+        : {
+            assembly_index: bytes.readInt32LE(at + 4),
+            ...metadataTokenFact(bytes.readUInt32LE(tokenAt), tokenAt),
+          }),
     };
     checkRange(
       `image ${index} types`,
@@ -429,6 +443,52 @@ function* readImages({
     result.push(image);
   }
   return result;
+}
+
+function* readAssemblies({
+  bytes,
+  section,
+  assemblyCount,
+  readString,
+  onRow,
+}: MetadataTables): Generator<void, Il2cppMetadataDecoded["assemblies"]> {
+  if (assemblyCount === undefined) return undefined;
+  const start = section("assemblies").offset;
+  const assemblies: NonNullable<Il2cppMetadataDecoded["assemblies"]> = [];
+  for (let index = 0; index < assemblyCount; index++) {
+    if (index % 256 === 0) yield;
+    const at = start + index * V39_ASSEMBLY_RECORD_BYTES;
+    const tokenAt = at + 4;
+    const identity = {
+      image_index: bytes.readInt32LE(at),
+      name: readString(bytes.readInt32LE(at + 20), `assembly ${index} name`),
+      culture: readString(
+        bytes.readInt32LE(at + 24),
+        `assembly ${index} culture`,
+      ),
+      version: [44, 48, 52, 56]
+        .map((offset) => bytes.readInt32LE(at + offset))
+        .join("."),
+      public_key_token: bytes.toString("hex", at + 60, at + 68),
+    };
+    const rawToken = bytes.readUInt32LE(tokenAt);
+    // Runtime.cpp loads this dedicated image. Both owned Unity 6000.3.15f1
+    // outputs have nil AssemblyDef and Module tokens for its generated row.
+    const generated =
+      rawToken === 0x20000000 &&
+      isIl2cppGeneratedAssemblyIdentity(identity) &&
+      bytes.readUInt32LE(at + 8) === 0 &&
+      readString(bytes.readInt32LE(at + 28), `assembly ${index} public key`) ===
+        "" &&
+      bytes.subarray(at + 32, at + 44).every((byte) => byte === 0);
+    const assembly = {
+      ...identity,
+      ...metadataTokenFact(rawToken, tokenAt, generated ? undefined : 0x20),
+    };
+    onRow?.(assembly);
+    assemblies.push(assembly);
+  }
+  return assemblies;
 }
 
 /** Record each type's enclosing type from its declaring type's nestedTypes range. */
@@ -541,6 +601,7 @@ function* readTypes(tables: MetadataTables): Generator<
       }
     }
     const countsAt = starts + 32;
+    const tokenAt = at + sizes.typeDefinitions - 4;
     const type = {
       name: readString(bytes.readInt32LE(at), `type ${index} name`),
       namespace: readString(
@@ -552,6 +613,9 @@ function* readTypes(tables: MetadataTables): Generator<
       nested_type_start: bytes.readInt32LE(starts + 16),
       nested_type_count: bytes.readUInt16LE(countsAt + 8),
       declaring_type: -1,
+      ...(tables.assemblyCount === undefined
+        ? {}
+        : metadataTokenFact(bytes.readUInt32LE(tokenAt), tokenAt, 0x02)),
     };
     checkRange(
       `type ${index} methods`,
@@ -585,6 +649,7 @@ function* readMethods({
   recordBytes: sizes,
   counts,
   readString,
+  assemblyCount,
   methodReturnParameterToken,
   linkFacts,
   onRow,
@@ -599,12 +664,20 @@ function* readMethods({
   const typeTotal = counts.typeDefinitions;
   const result: Il2cppMetadataDecoded["methods"] = [];
   const parameterRanges: MetadataOwnerRange[] = [];
+  const tokenOffset =
+    methodContainerAt({ widths, methodReturnParameterToken }) +
+    widths.generic_container;
   for (let index = 0; index < counts.methods; index++) {
     if (index % 256 === 0) yield;
     const at = methods.offset + index * sizes.methods;
+    const tokenAt = at + tokenOffset;
+    const token = bytes.readUInt32LE(tokenAt);
     const method = {
       name: readString(bytes.readInt32LE(at), `method ${index} name`),
       declaring_type: readIndex(bytes, at + 4, widths.type_definition),
+      ...(assemblyCount === undefined
+        ? {}
+        : metadataTokenFact(token, tokenAt, 0x06)),
     };
     if (method.declaring_type < -1 || method.declaring_type >= typeTotal)
       throw new Il2cppMetadataFormatFailure(
@@ -614,11 +687,7 @@ function* readMethods({
     if (linkFacts !== undefined) {
       const returnAt = at + 4 + widths.type_definition;
       linkFacts.returnTypes[index] = readIndex(bytes, returnAt, widths.type);
-      linkFacts.methodTokens[index] = bytes.readUInt32LE(
-        at +
-          methodContainerAt({ widths, methodReturnParameterToken }) +
-          widths.generic_container,
-      );
+      linkFacts.methodTokens[index] = token;
     }
     parameterRanges.push({
       start: readIndex(
@@ -701,8 +770,153 @@ function* checkImageRanges(images: Il2cppMetadataDecoded["images"]) {
   }
 }
 
+// Runtime.cpp initializes the generated COM object and optional shared types.
+// The owned Windows v39 output and __Generated_CodeGen.c name the other rows.
+const generatedTypeMethods = new Map<string, string | null>([
+  ["IActivationFactory", "ActivateInstance"],
+  ["System.__Il2CppComObject", "Finalize"],
+  ["System.__Il2CppComDelegate", "Finalize"],
+  ["Unity.IL2CPP.Metadata.__Il2CppFullySharedGenericType", null],
+  ["Unity.IL2CPP.Metadata.__Il2CppFullySharedGenericStructType", null],
+]);
+
+const generatedImageHasRuntimeDeclarations = (
+  image: Il2cppMetadataDecoded["images"][number],
+  types: Il2cppMetadataDecoded["types"],
+  methods: Il2cppMetadataDecoded["methods"],
+) => {
+  if (image.type_count > generatedTypeMethods.size) return false;
+  const seen = new Set<string>();
+  for (
+    let index = image.type_start;
+    index < image.type_start + image.type_count;
+    index++
+  ) {
+    const type = types[index]!;
+    const name = type.namespace ? `${type.namespace}.${type.name}` : type.name;
+    const method = generatedTypeMethods.get(name);
+    if (
+      method === undefined ||
+      seen.has(name) ||
+      type.declaring_type !== -1 ||
+      type.nested_type_count !== 0 ||
+      (method === null
+        ? type.method_count !== 0
+        : type.method_count !== 1 ||
+          methods[type.method_start]?.name !== method)
+    )
+      return false;
+    seen.add(name);
+  }
+  return seen.has("System.__Il2CppComObject");
+};
+
+/** Version 39 tokens are scoped to one image and each declaration needs an owner. */
+function* checkDeclarationIdentity({
+  assemblies,
+  images,
+  types,
+  methods,
+  fields,
+}: Pick<
+  Il2cppMetadataDecoded,
+  "assemblies" | "images" | "types" | "methods" | "fields"
+>) {
+  if (assemblies === undefined) return;
+  if (assemblies.length !== images.length)
+    throw new Il2cppMetadataFormatFailure(
+      "metadata-owner-mismatch",
+      `${assemblies.length} assemblies cannot own ${images.length} images one to one`,
+    );
+
+  const typeImages = new Int32Array(types.length).fill(-1);
+  const tokens = images.map(() => new Set<string>());
+  let generatedImage = -1;
+  for (const [index, image] of images.entries()) {
+    if (index % 256 === 0) yield;
+    const assembly =
+      image.assembly_index === undefined
+        ? undefined
+        : assemblies[image.assembly_index];
+    if (assembly?.image_index !== index)
+      throw new Il2cppMetadataFormatFailure(
+        "metadata-owner-mismatch",
+        `image ${index} and assembly ${image.assembly_index} do not name each other`,
+      );
+    if (assembly.token === "0x20000000") {
+      if (
+        generatedImage !== -1 ||
+        image.name !== "__Generated" ||
+        image.token !== "0x00000000" ||
+        !generatedImageHasRuntimeDeclarations(image, types, methods)
+      )
+        throw new Il2cppMetadataFormatFailure(
+          "metadata-owner-mismatch",
+          `image ${index} has a nil assembly token without the generated runtime image layout`,
+        );
+      generatedImage = index;
+    } else if (!il2cppModuleTokenPattern.test(image.token ?? ""))
+      throw new Il2cppMetadataFormatFailure(
+        "invalid-metadata-token",
+        `image ${index} token ${image.token} is not a nonzero Module RID`,
+      );
+    if (image.type_count > 0)
+      typeImages.fill(
+        index,
+        image.type_start,
+        image.type_start + image.type_count,
+      );
+  }
+
+  const add = (image: number | undefined, token: string, label: string) => {
+    const seen = tokens[image ?? -1];
+    if (seen === undefined)
+      throw new Il2cppMetadataFormatFailure(
+        "metadata-owner-mismatch",
+        `${label} has no declaring image for token ${token}`,
+      );
+    if (seen.has(token))
+      throw new Il2cppMetadataFormatFailure(
+        "duplicate-metadata-token",
+        `${label} reuses token ${token} in image ${image}`,
+      );
+    seen.add(token);
+  };
+
+  for (const [index, type] of types.entries()) {
+    if (index % 256 === 0) yield;
+    const image = typeImages[index]!;
+    if (type.declaring_type >= 0 && typeImages[type.declaring_type] !== image)
+      throw new Il2cppMetadataFormatFailure(
+        "metadata-owner-mismatch",
+        `type ${index} and its declaring type ${type.declaring_type} belong to different images`,
+      );
+    add(image, type.token!, `type ${index}`);
+  }
+  for (const [collection, rows] of [
+    ["method", methods],
+    ["field", fields],
+  ] as const) {
+    for (const [index, row] of rows.entries()) {
+      if (index % 256 === 0) yield;
+      const owner = typeImages[row.declaring_type];
+      if (
+        generatedImage >= 0 &&
+        owner === generatedImage &&
+        collection === "field"
+      )
+        throw new Il2cppMetadataFormatFailure(
+          "metadata-owner-mismatch",
+          `field ${index} is outside the generated runtime image layout`,
+        );
+      add(owner, row.token!, `${collection} ${index}`);
+    }
+  }
+}
+
 /** Row counts known from the header and record sizes, before rows are built. */
 export interface Il2cppMetadataRowCounts {
+  readonly assemblies?: number;
   readonly images: number;
   readonly types: number;
   readonly methods: number;
@@ -880,6 +1094,10 @@ function* readMetadataCoreSteps(
   const widths =
     layout.indexing === "counted" ? resolveWidths(section) : FIXED_WIDTHS;
   const expected = il2cppMetadataRecordBytes(widths, version);
+  const assemblyCount =
+    version === 39
+      ? checkedSectionCount(section("assemblies"), V39_ASSEMBLY_RECORD_BYTES)
+      : undefined;
   let tables: MetadataTables = {
     bytes,
     section,
@@ -888,6 +1106,7 @@ function* readMetadataCoreSteps(
     counts: recordCounts(version, section, expected, widths),
     typeDefinitionTypeIndices: layout.typeDefinitionTypeIndices,
     indexing: layout.indexing,
+    assemblyCount,
     methodReturnParameterToken: layout.methodReturnParameterToken,
     readString: createStringReader(
       bytes,
@@ -903,6 +1122,7 @@ function* readMetadataCoreSteps(
     onRow: options.onRow,
   };
   options.beforeRows?.({
+    ...(assemblyCount === undefined ? {} : { assemblies: assemblyCount }),
     images: tables.counts.images,
     types: tables.counts.typeDefinitions,
     methods: tables.counts.methods,
@@ -924,6 +1144,7 @@ function* readMetadataCoreSteps(
       },
     };
   yield;
+  const assemblies = yield* readAssemblies(tables);
   const images = yield* readImages(tables);
   yield* checkImageRanges(images);
   const { types, memberRanges } = yield* readTypes(tables);
@@ -933,12 +1154,20 @@ function* readMetadataCoreSteps(
     ...memberRanges,
     parameters: parameterRanges,
   });
+  yield* checkDeclarationIdentity({
+    assemblies,
+    images,
+    types,
+    methods,
+    fields: members.fields,
+  });
   return {
     metadata: {
       magic,
       metadata_version: version,
       index_widths: widths,
       sections,
+      ...(assemblies === undefined ? {} : { assemblies }),
       images,
       types,
       methods,

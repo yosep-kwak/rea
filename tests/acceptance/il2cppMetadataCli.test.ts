@@ -283,9 +283,9 @@ cliTest(
       sha256: createHash("sha256").update(bytes).digest("hex"),
       bytes: bytes.length,
     });
-    expect(report.images).toEqual(FIXTURE_IMAGES);
-    expect(report.types).toEqual(FIXTURE_TYPES);
-    expect(report.methods).toEqual(FIXTURE_METHODS);
+    expect(report.images).toMatchObject(FIXTURE_IMAGES);
+    expect(report.types).toMatchObject(FIXTURE_TYPES);
+    expect(report.methods).toMatchObject(FIXTURE_METHODS);
     expect(evidence.parameters).toEqual({ path });
 
     const { client, call } = await connectLocalToolsMcp();
@@ -313,6 +313,7 @@ cliTest(
     expect(view.summary.magic).toBe(report.magic);
     expect(view.summary.counts).toEqual({
       sections: 31,
+      assemblies: 2,
       images: 2,
       types: 4,
       methods: 5,
@@ -340,6 +341,7 @@ cliTest(
     await unlink(path);
     for (const collection of [
       "sections",
+      "assemblies",
       "images",
       "types",
       "methods",
@@ -349,6 +351,9 @@ cliTest(
       "parameters",
       "string_literals",
     ] as const) {
+      const completeRows = report[collection];
+      if (completeRows === undefined)
+        throw new Error(`Missing complete ${collection} rows`);
       const rows: unknown[] = [];
       let offset = 0;
       do {
@@ -367,10 +372,10 @@ cliTest(
           throw new Error("Wrong IL2CPP page kind");
         expect(projected.counts).toEqual(view.summary.counts);
         rows.push(...projected.items);
-        offset = projected.coverage.next_offset ?? report[collection].length;
-      } while (offset < report[collection].length);
+        offset = projected.coverage.next_offset ?? completeRows.length;
+      } while (offset < completeRows.length);
       expect(rows).toEqual(
-        report[collection].map((row, index) => ({ index, ...row })),
+        completeRows.map((row, index) => ({ index, ...row })),
       );
     }
     await client.ping();
@@ -748,7 +753,9 @@ it("imports historical metadata Evidence with unavailable member collections wit
   expect(
     parseEvidence(summary.structuredContent).normalized_result,
   ).toMatchObject({
-    summary: { counts: { methods: 5, fields: null, parameters: null } },
+    summary: {
+      counts: { assemblies: null, methods: 5, fields: null, parameters: null },
+    },
     unknowns: expect.arrayContaining([
       expect.stringContaining("did not collect parameters"),
     ]),
@@ -823,7 +830,7 @@ cliTest(
     });
     expect(
       il2cppMetadataSchema.parse(evidence.normalized_result).methods,
-    ).toEqual(FIXTURE_METHODS);
+    ).toMatchObject(FIXTURE_METHODS);
     await unlink(path);
     const query = join(root, "query.json");
     await writeFile(

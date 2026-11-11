@@ -18,6 +18,8 @@ interface Il2cppMetadataFixtureOptions {
   readonly nestingCycle?: boolean;
   /** Append an image with no types, whose start is the -1 sentinel at the narrow width. */
   readonly emptyImage?: boolean;
+  /** Add the producer-generated COM type and its nil AssemblyDef/Module tokens. */
+  readonly generatedImage?: boolean;
   /** Nonempty property/event tables with deliberately different owner ranges. */
   readonly propertiesAndEvents?: boolean;
   /** Override type names while preserving the fixture's row ownership. */
@@ -221,9 +223,22 @@ const assembleFile = (
 
 /** Image rows a fixture holds, including the optional empty image. */
 export const fixtureImages = (options: Il2cppMetadataFixtureOptions = {}) => [
-  ...FIXTURE_IMAGES,
+  FIXTURE_IMAGES[0],
+  {
+    ...FIXTURE_IMAGES[1],
+    type_count: FIXTURE_IMAGES[1].type_count + (options.wide?.fillerTypes ?? 0),
+  },
   ...(options.emptyImage === true
     ? [{ name: "Empty.dll", type_start: -1, type_count: 0 }]
+    : []),
+  ...(options.generatedImage === true
+    ? [
+        {
+          name: "__Generated",
+          type_start: FIXTURE_TYPES.length + (options.wide?.fillerTypes ?? 0),
+          type_count: 1,
+        },
+      ]
     : []),
 ];
 
@@ -264,7 +279,8 @@ const encodeMethods = (
       methodContainerIndices.get(index) ?? -1,
     );
     methods.writeUInt32LE(
-      FIXTURE_METHOD_TOKENS[index]!,
+      FIXTURE_METHOD_TOKENS[index] ??
+        (method.name === "Finalize" ? 0x06000001 : 0x06000003),
       parameterStart + P + G,
     );
     methods.writeUInt16LE(parameters, at + recordBytes.methods - 2);
@@ -291,8 +307,10 @@ const encodeMembers = ({
   // Field records: name, type index, token. Parameters: name, token, type.
   const fields = Buffer.alloc(FIXTURE_FIELDS.length * (8 + T));
   FIXTURE_FIELDS.forEach((field, index) => {
-    fields.writeInt32LE(intern(field.name), index * (8 + T));
-    writeIndex(fields, index * (8 + T) + 4, T, 0);
+    const at = index * (8 + T);
+    fields.writeInt32LE(intern(field.name), at);
+    writeIndex(fields, at + 4, T, 0);
+    fields.writeUInt32LE(0x04000007 + index, at + 4 + T);
   });
   // Property: name, get, set, flags, token. Event: name, TypeIndex,
   // add/remove/raise MethodIndex values, token. Method indices stay int32.
@@ -375,10 +393,26 @@ export const fixtureRows = (options: Il2cppMetadataFixtureOptions = {}) => {
       nested_type_count: 0,
       declaring_type: -1,
     })),
+    ...(options.generatedImage === true
+      ? [
+          {
+            name: "__Il2CppComObject",
+            namespace: "System",
+            method_start: FIXTURE_METHODS.length + Number(fillers > 0),
+            method_count: 1,
+            nested_type_start: -1,
+            nested_type_count: 0,
+            declaring_type: -1,
+          },
+        ]
+      : []),
   ];
   const methods = [
     ...FIXTURE_METHODS,
     ...(fillers === 0 ? [] : [{ name: "Fill", declaring_type: last }]),
+    ...(options.generatedImage === true
+      ? [{ name: "Finalize", declaring_type: FIXTURE_TYPES.length + fillers }]
+      : []),
   ];
   return { types, methods };
 };
@@ -472,7 +506,7 @@ const encodeTypes = ({
     types.writeUInt16LE(type.nested_type_count, at + 8);
     at += 16;
     types.writeUInt32LE(0, at);
-    types.writeUInt32LE(0x02000001 + index, at + 4);
+    types.writeUInt32LE(0x02000001 + (index < 3 ? index : index - 3), at + 4);
   });
 
   return types;
@@ -583,6 +617,39 @@ const encodeImageRows = (
     writeIndex(bytes, at + 12 + typeDefinitionWidth, typeDefinitionWidth, -1);
     bytes.writeUInt32LE(0, at + 12 + 2 * typeDefinitionWidth);
     bytes.writeInt32LE(-1, at + 16 + 2 * typeDefinitionWidth);
+    bytes.writeUInt32LE(
+      image.name === "__Generated" ? 0 : 1,
+      at + 20 + 2 * typeDefinitionWidth,
+    );
+  });
+  return bytes;
+};
+
+/** Unity 6000.3.15f1 GlobalMetadataFileInternals.h, fixed 68-byte v39 records. */
+const encodeAssemblyRows = (
+  images: readonly ReturnType<typeof fixtureImages>[number][],
+  intern: (value: string) => number,
+) => {
+  const bytes = Buffer.alloc(images.length * 68);
+  images.forEach((image, index) => {
+    const at = index * 68;
+    bytes.writeInt32LE(index, at);
+    const generated = image.name === "__Generated";
+    bytes.writeUInt32LE(generated ? 0x20000000 : 0x20000001, at + 4);
+    bytes.writeUInt32LE(generated ? 0 : 1, at + 8);
+    bytes.writeInt32LE(-1, at + 12);
+    bytes.writeInt32LE(
+      intern(generated ? image.name : image.name.slice(0, -4)),
+      at + 20,
+    );
+    bytes.writeInt32LE(intern(index === 0 ? "ko-KR" : ""), at + 24);
+    bytes.writeInt32LE(intern(""), at + 28);
+    if (index === 0) {
+      [1, 2, 3, 4].forEach((part, i) =>
+        bytes.writeInt32LE(part, at + 44 + i * 4),
+      );
+      bytes.set(Buffer.from("0123456789abcdef", "hex"), at + 60);
+    }
   });
   return bytes;
 };
@@ -678,6 +745,7 @@ export const createIl2cppMetadataFixture = (
   });
 
   const images = encodeImageRows(imageRows, recordBytes.images, D, intern);
+  const assemblies = fixed ? null : encodeAssemblyRows(imageRows, intern);
 
   const methods = encodeMethods(
     rows.methods,
@@ -741,6 +809,14 @@ export const createIl2cppMetadataFixture = (
     ["nestedTypes", { bytes: nested, count: nestedTypeEntries.length }],
     ["typeDefinitions", { bytes: types, count: typeRows.length }],
     ["images", { bytes: images, count: imageRows.length }],
+    ...(assemblies === null
+      ? []
+      : [
+          [
+            "assemblies",
+            { bytes: assemblies, count: imageRows.length },
+          ] as const,
+        ]),
     ...(interfaceOffsets === null
       ? []
       : [

@@ -6,13 +6,18 @@ import {
   type Il2cppMetadata,
 } from "../il2cpp/il2cppMetadata.js";
 import { createEvidence } from "../evidence.js";
-import { freezeJsonSnapshot } from "../immutableJson.js";
-import { jsonObjectSchema } from "../jsonValue.js";
+import { freezeJsonSnapshot as freeze } from "../immutableJson.js";
+import { jsonObjectSchema, ownedJsonValueSchema } from "../jsonValue.js";
 import type { AdmittedView, SummaryAnalysisView } from "./analysisViewShape.js";
 import {
   il2cppMetadataViewRequestSchema,
   projectIl2cppMetadataView as projectAdmittedIl2cppMetadataView,
 } from "./il2cppMetadataView.js";
+import { createIl2cppMetadataFixture } from "../../../tests/fixtures/il2cpp/metadata.js";
+import { readIl2cppMetadata } from "../../../tests/fixtures/il2cpp/readers.js";
+
+const freezeJsonSnapshot = (value: unknown) =>
+  freeze(ownedJsonValueSchema.parse(value));
 
 type Il2cppMetadataViewInput =
   | SummaryAnalysisView
@@ -87,6 +92,98 @@ const page = {
   offset: 0,
   limit: 1,
 } as const;
+
+it("retains the same assembly and token locations in complete, summary and paged Evidence", () => {
+  const fixture = createIl2cppMetadataFixture();
+  const decoded = readIl2cppMetadata(fixture.bytes);
+  const source = parent(
+    {
+      ...report,
+      ...decoded,
+      artifact: { ...report.artifact, bytes: fixture.bytes.length },
+    },
+    true,
+  );
+  expect(summarize(source)).toMatchObject({
+    summary: {
+      artifact: { sha256: report.artifact.sha256 },
+      counts: { assemblies: 2 },
+    },
+  });
+  const query = il2cppMetadataViewRequestSchema.parse({
+    kind: "il2cpp-metadata",
+    collection: "assemblies",
+    indices: [1],
+    fields: ["name", "image_index", "token", "source_offset"],
+  });
+  const result = projectAdmittedIl2cppMetadataView(source, query);
+  expect(result).toMatchObject({
+    ok: true,
+    value: {
+      artifact: { sha256: report.artifact.sha256 },
+      items: [
+        {
+          index: 1,
+          name: "mscorlib",
+          image_index: 1,
+          token: "0x20000001",
+          source_offset: fixture.section("assemblies").offset + 72,
+        },
+      ],
+    },
+  });
+  const fields = projectIl2cppMetadataView(source, {
+    ...page,
+    collection: "fields",
+    fields: ["token", "source_offset"],
+  });
+  expect(fields).toMatchObject({
+    ok: true,
+    value: {
+      items: [
+        {
+          index: 0,
+          token: "0x04000007",
+          source_offset: fixture.section("fields").offset + 5,
+        },
+      ],
+    },
+  });
+});
+
+it("keeps assembly identity unavailable in historical Evidence without assembly rows", () => {
+  const source = parent(report, false);
+  expect(summarize(source)).toMatchObject({
+    summary: { counts: { assemblies: null } },
+  });
+  expect(
+    projectIl2cppMetadataView(source, { ...page, collection: "assemblies" }),
+  ).toMatchObject({ ok: false });
+});
+
+it("rejects retained declaration identity without a valid token source location", () => {
+  const fixture = createIl2cppMetadataFixture();
+  const decoded = readIl2cppMetadata(fixture.bytes);
+  const linked = {
+    ...report,
+    ...decoded,
+    artifact: { ...report.artifact, bytes: fixture.bytes.length },
+  };
+  const first = linked.methods[0]!;
+  const source = parent(
+    {
+      ...linked,
+      methods: [
+        { ...first, source_offset: fixture.section("fields").offset },
+        ...linked.methods.slice(1),
+      ],
+    },
+    false,
+  );
+  expect(
+    projectIl2cppMetadataView(source, { ...page, collection: "methods" }),
+  ).toMatchObject({ ok: false });
+});
 
 it("validates a sealed parent once across pages and keeps counts exact", () => {
   const parse = vi.spyOn(il2cppMetadataParentSchema, "safeParse");

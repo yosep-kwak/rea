@@ -97,7 +97,7 @@ export const inspectIl2cppMetadataInputSchema = z.strictObject({
     .enum(["complete", "summary"])
     .default("summary")
     .describe(
-      "summary (default) retains complete Evidence and returns identity and collection counts; complete returns every image, type, method, member, parameter and string-literal row inline",
+      "summary (default) retains complete Evidence and returns identity and collection counts; complete returns every supported assembly, image, type, method, member, parameter and string-literal row inline",
     ),
   binary_path: absoluteLocalPathStringSchema
     .optional()
@@ -138,11 +138,44 @@ export const il2cppMetadataSectionSchema = z.strictObject({
   count: count.nullable(),
 });
 
+const tokenSourceOffset = count.describe(
+  "Absolute byte offset of the four-byte token in the metadata artifact",
+);
+const rawToken = z.string().regex(/^0x[0-9a-f]{8}$/);
+const definitionToken = (table: "02" | "04" | "06") =>
+  z.string().regex(new RegExp(`^0x${table}(?!000000)[0-9a-f]{6}$`));
+export const il2cppModuleTokenPattern = /^0x00(?!000000)[0-9a-f]{6}$/;
+
+/** Version 39 assembly definition; row position is its AssemblyIndex. */
+export const il2cppMetadataAssemblySchema = z.strictObject({
+  name: z.string(),
+  version: z.string().regex(/^-?\d+(\.-?\d+){3}$/),
+  culture: z.string(),
+  public_key_token: z.string().regex(/^[0-9a-f]{16}$/),
+  image_index: count,
+  token: z.string().regex(/^0x20[0-9a-f]{6}$/),
+  source_offset: tokenSourceOffset,
+});
+
+export const isIl2cppGeneratedAssemblyIdentity = (
+  row: Pick<
+    z.infer<typeof il2cppMetadataAssemblySchema>,
+    "name" | "version" | "culture" | "public_key_token"
+  >,
+) =>
+  row.name === "__Generated" &&
+  row.version === "0.0.0.0" &&
+  row.culture === "" &&
+  row.public_key_token === "0000000000000000";
+
 /** Assembly image and its contiguous type-definition range. */
 export const il2cppMetadataImageSchema = z.strictObject({
   name: z.string(),
   type_start: optionalIndex,
   type_count: count,
+  assembly_index: count.optional(),
+  token: rawToken.optional(),
+  source_offset: tokenSourceOffset.optional(),
 });
 
 /** Type definition; row position is its TypeDefinitionIndex. */
@@ -157,6 +190,8 @@ export const il2cppMetadataTypeSchema = z.strictObject({
   declaring_type: optionalIndex.describe(
     "Enclosing TypeDefinitionIndex derived from nestedTypes; -1 means no enclosing metadata type was recorded",
   ),
+  token: definitionToken("02").optional(),
+  source_offset: tokenSourceOffset.optional(),
 });
 
 /** Method definition; row position is its MethodIndex. */
@@ -165,13 +200,20 @@ export const il2cppMetadataMethodSchema = z.strictObject({
   declaring_type: optionalIndex.describe(
     "Declared TypeDefinitionIndex from this MethodDefinition; -1 is an absent reference",
   ),
+  token: definitionToken("06").optional(),
+  source_offset: tokenSourceOffset.optional(),
 });
 
-/** Field, property or event name and the type whose member range holds it. */
+/** Member name and the type whose range holds it. */
 export const il2cppMetadataMemberSchema = z.strictObject({
   name: z.string(),
   /** -1 when no type range claims the row. */
   declaring_type: optionalIndex,
+});
+
+export const il2cppMetadataFieldSchema = il2cppMetadataMemberSchema.extend({
+  token: definitionToken("04").optional(),
+  source_offset: tokenSourceOffset.optional(),
 });
 
 /** Parameter name and the method whose parameter range holds it. */
@@ -323,10 +365,11 @@ export const il2cppMetadataObjectSchema = z.strictObject({
     ]),
   }),
   sections: z.array(il2cppMetadataSectionSchema),
+  assemblies: z.array(il2cppMetadataAssemblySchema).optional(),
   images: z.array(il2cppMetadataImageSchema),
   types: z.array(il2cppMetadataTypeSchema),
   methods: z.array(il2cppMetadataMethodSchema),
-  fields: z.array(il2cppMetadataMemberSchema),
+  fields: z.array(il2cppMetadataFieldSchema),
   properties: z.array(il2cppMetadataMemberSchema),
   events: z.array(il2cppMetadataMemberSchema),
   parameters: z.array(il2cppMetadataParameterSchema),
@@ -401,6 +444,73 @@ const codeRowContradicts = (
         BigInt(row.address) !== BigInt(imageBase) + BigInt(row.rva))
     : row.address !== null || row.rva !== null;
 
+const validateDeclarationProvenance = (
+  report: z.infer<typeof il2cppMetadataParentObjectSchema>,
+  context: z.RefinementCtx,
+) => {
+  const { assemblies, images } = report;
+  if (assemblies === undefined) return;
+  if (report.metadata_version !== 39 || assemblies.length !== images.length)
+    context.addIssue({
+      code: "custom",
+      path: ["assemblies"],
+      message:
+        "Assembly identity requires the version 39 image and assembly layout.",
+    });
+  images.forEach((image, index) => {
+    const assembly =
+      image.assembly_index === undefined
+        ? undefined
+        : assemblies[image.assembly_index];
+    if (assembly?.image_index !== index) {
+      context.addIssue({
+        code: "custom",
+        path: ["images", index, "assembly_index"],
+        message:
+          "The image and assembly must name each other's metadata indices.",
+      });
+      return;
+    }
+    const valid =
+      assembly.token === "0x20000000"
+        ? isIl2cppGeneratedAssemblyIdentity(assembly) &&
+          image.name === "__Generated" &&
+          image.token === "0x00000000"
+        : il2cppModuleTokenPattern.test(image.token ?? "");
+    if (!valid)
+      context.addIssue({
+        code: "custom",
+        path: ["images", index, "token"],
+        message:
+          "An image needs a nonzero Module RID or the reciprocal generated sentinel.",
+      });
+  });
+  for (const [collection, name] of [
+    ["assemblies", "assemblies"],
+    ["images", "images"],
+    ["types", "typeDefinitions"],
+    ["methods", "methods"],
+    ["fields", "fields"],
+  ] as const) {
+    const section = report.sections.find((row) => row.name === name);
+    report[collection]?.forEach(({ token, source_offset }, index) => {
+      if (
+        token === undefined ||
+        source_offset === undefined ||
+        section === undefined ||
+        source_offset < section.offset ||
+        source_offset + 4 > section.offset + section.size
+      )
+        context.addIssue({
+          code: "custom",
+          path: [collection, index, "source_offset"],
+          message:
+            "The token must retain its four-byte location inside its metadata section.",
+        });
+    });
+  }
+};
+
 const validateMetadataFacts = (
   report: z.infer<typeof il2cppMetadataParentObjectSchema>,
   context: z.RefinementCtx,
@@ -426,6 +536,7 @@ const validateMetadataFacts = (
         message: "Section range is outside the selected artifact.",
       });
   });
+  validateDeclarationProvenance(report, context);
   if (report.binary != null)
     for (const collection of [
       "return_types",

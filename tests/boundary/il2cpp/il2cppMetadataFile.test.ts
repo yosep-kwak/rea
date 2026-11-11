@@ -62,6 +62,174 @@ const mutated = (
   return bytes;
 };
 
+describe("IL2CPP version 39 assembly and declaration identity", () => {
+  it("publishes assembly identity and exact token offsets without global RID uniqueness", () => {
+    const fixture = createIl2cppMetadataFixture();
+    const decoded = readIl2cppMetadata(fixture.bytes);
+    expect(decoded).toMatchObject({
+      assemblies: [
+        {
+          name: "Assembly-CSharp",
+          version: "1.2.3.4",
+          culture: "ko-KR",
+          public_key_token: "0123456789abcdef",
+          image_index: 0,
+          token: "0x20000001",
+          source_offset: fixture.section("assemblies").offset + 4,
+        },
+        {
+          name: "mscorlib",
+          version: "0.0.0.0",
+          culture: "",
+          public_key_token: "0000000000000000",
+          image_index: 1,
+          token: "0x20000001",
+          source_offset: fixture.section("assemblies").offset + 72,
+        },
+      ],
+    });
+    expect(decoded.images[0]).toMatchObject({
+      assembly_index: 0,
+      token: "0x00000001",
+      source_offset: fixture.record("images", 0) + 22,
+    });
+    expect(decoded.types.map((row) => row.token)).toEqual([
+      "0x02000001",
+      "0x02000002",
+      "0x02000003",
+      "0x02000001",
+    ]);
+    expect(decoded.types[1]).toMatchObject({
+      name: "Slot",
+      declaring_type: 0,
+      source_offset: fixture.record("typeDefinitions", 1) + 68,
+    });
+    expect(decoded.methods[1]).toMatchObject({
+      token: "0x06000001",
+      source_offset: fixture.record("methods", 1) + 12,
+    });
+    expect(decoded.fields[0]).toMatchObject({
+      token: "0x04000007",
+      source_offset: fixture.section("fields").offset + 5,
+    });
+  });
+
+  it.each([
+    [
+      "TypeDef table",
+      0x06000001,
+      (f: Il2cppMetadataFixture) => f.record("typeDefinitions", 0) + 68,
+      "invalid-metadata-token",
+    ],
+    [
+      "MethodDef RID",
+      0x06000000,
+      (f: Il2cppMetadataFixture) => f.record("methods", 0) + 12,
+      "invalid-metadata-token",
+    ],
+    [
+      "FieldDef table",
+      0x02000001,
+      (f: Il2cppMetadataFixture) => f.section("fields").offset + 5,
+      "invalid-metadata-token",
+    ],
+    [
+      "Assembly RID",
+      0x20000000,
+      (f: Il2cppMetadataFixture) => f.section("assemblies").offset + 4,
+      "invalid-metadata-token",
+    ],
+    [
+      "same image TypeDef",
+      0x02000001,
+      (f: Il2cppMetadataFixture) => f.record("typeDefinitions", 1) + 68,
+      "duplicate-metadata-token",
+    ],
+    [
+      "same image MethodDef",
+      0x06000002,
+      (f: Il2cppMetadataFixture) => f.record("methods", 1) + 12,
+      "duplicate-metadata-token",
+    ],
+    [
+      "same image FieldDef",
+      0x04000007,
+      (f: Il2cppMetadataFixture) => f.section("fields").offset + 14,
+      "duplicate-metadata-token",
+    ],
+    [
+      "image assembly owner",
+      1,
+      (f: Il2cppMetadataFixture) => f.record("images", 0) + 4,
+      "metadata-owner-mismatch",
+    ],
+    [
+      "assembly image owner",
+      1,
+      (f: Il2cppMetadataFixture) => f.section("assemblies").offset,
+      "metadata-owner-mismatch",
+    ],
+    [
+      "unowned type",
+      2,
+      (f: Il2cppMetadataFixture) => f.record("images", 0) + 9,
+      "metadata-owner-mismatch",
+    ],
+    [
+      "unowned field",
+      0,
+      (f: Il2cppMetadataFixture) => f.record("typeDefinitions", 0) + 52,
+      "metadata-owner-mismatch",
+    ],
+  ] as const)(
+    "rejects corrupt %s in a metadata-only read",
+    (_, value, offset, reason) => {
+      rejects(
+        mutated((fixture, bytes) =>
+          bytes.writeUInt32LE(value, offset(fixture)),
+        ),
+        reason,
+      );
+    },
+  );
+});
+
+describe("IL2CPP version 39 generated image sentinel", () => {
+  it("retains the observed nil assembly/module tokens with owned generated declarations", () => {
+    const fixture = createIl2cppMetadataFixture({ generatedImage: true });
+    const decoded = readIl2cppMetadata(fixture.bytes);
+    expect(decoded.assemblies?.at(-1)).toMatchObject({
+      name: "__Generated",
+      token: "0x20000000",
+      image_index: 2,
+    });
+    expect(decoded.images.at(-1)).toMatchObject({
+      name: "__Generated",
+      token: "0x00000000",
+      assembly_index: 2,
+    });
+    expect(decoded.methods.at(-1)).toMatchObject({
+      name: "Finalize",
+      token: "0x06000001",
+    });
+  });
+
+  it("rejects a generated sentinel that owns an ordinary method declaration", () => {
+    rejects(
+      mutated(
+        (fixture, bytes) => {
+          bytes.writeInt32LE(
+            fixture.stringOffset("Update") - fixture.section("strings").offset,
+            fixture.record("methods", 5),
+          );
+        },
+        createIl2cppMetadataFixture({ generatedImage: true }),
+      ),
+      "metadata-owner-mismatch",
+    );
+  });
+});
+
 describe("IL2CPP global-metadata version 39", () => {
   it("yields through a large owner range before emitting its first parameter fact", () => {
     const fixture = createIl2cppMetadataFixture({
@@ -105,10 +273,9 @@ describe("IL2CPP global-metadata version 39", () => {
     },
   );
   it.each([1, 2, 4] as const)(
-    "decodes names, ranges and nesting with a %i-byte TypeIndex in about 1 KiB",
+    "decodes names, ranges and nesting with a %i-byte TypeIndex",
     (typeIndexWidth) => {
       const fixture = createIl2cppMetadataFixture({ typeIndexWidth });
-      expect(fixture.bytes.length).toBeLessThan(1100);
       const decoded = readIl2cppMetadata(fixture.bytes);
       expect(decoded.magic).toBe(fixture.bytes.readUInt32LE(0));
       expect(decoded.metadata_version).toBe(39);
@@ -119,9 +286,9 @@ describe("IL2CPP global-metadata version 39", () => {
         type: typeIndexWidth,
         type_width_source: "interface-offsets-record",
       });
-      expect(decoded.images).toEqual(FIXTURE_IMAGES);
-      expect(decoded.types).toEqual(FIXTURE_TYPES);
-      expect(decoded.methods).toEqual(FIXTURE_METHODS);
+      expect(decoded.images).toMatchObject(FIXTURE_IMAGES);
+      expect(decoded.types).toMatchObject(FIXTURE_TYPES);
+      expect(decoded.methods).toMatchObject(FIXTURE_METHODS);
       expect(decoded.sections).toHaveLength(31);
       expect(decoded.sections[0]).toEqual({
         name: "stringLiterals",
@@ -142,7 +309,7 @@ describe("IL2CPP global-metadata version 39", () => {
     expect(decoded.index_widths.type_width_source).toBe(
       "type-definition-record",
     );
-    expect(decoded.methods).toEqual(FIXTURE_METHODS);
+    expect(decoded.methods).toMatchObject(FIXTURE_METHODS);
   });
 
   it("accepts empty sections that share an offset with occupied sections and padding gaps", () => {
@@ -158,7 +325,7 @@ describe("IL2CPP global-metadata version 39", () => {
         fixture.header("strings", "size"),
       );
     });
-    expect(readIl2cppMetadata(bytes).types).toEqual(FIXTURE_TYPES);
+    expect(readIl2cppMetadata(bytes).types).toMatchObject(FIXTURE_TYPES);
   });
 });
 
@@ -693,13 +860,13 @@ describe("IL2CPP version 39 wide indices", () => {
         parameter: width,
       });
       const rows = fixtureRows({ wide });
-      expect(decoded.types).toEqual(rows.types);
-      expect(decoded.methods).toEqual(rows.methods);
+      expect(decoded.types).toMatchObject(rows.types);
+      expect(decoded.methods).toMatchObject(rows.methods);
       // The last method declares a type index beyond the narrower widths.
       expect(decoded.methods.at(-1)?.declaring_type).toBe(
         rows.types.length - 1,
       );
-      expect(decoded.images).toEqual(FIXTURE_IMAGES);
+      expect(decoded.images).toMatchObject(fixtureImages({ wide }));
     },
   );
 });
@@ -719,7 +886,7 @@ describe("IL2CPP narrow index sentinels", () => {
         createIl2cppMetadataFixture(options).bytes,
       );
       expect(decoded.index_widths.type_definition).toBe(width);
-      expect(decoded.images).toEqual(fixtureImages(options));
+      expect(decoded.images).toMatchObject(fixtureImages(options));
     },
   );
 });
@@ -755,7 +922,7 @@ describe("IL2CPP metadata members and string literals", () => {
       const decoded = readIl2cppMetadata(
         createIl2cppMetadataFixture({ version }).bytes,
       );
-      expect(decoded.fields).toEqual(FIXTURE_FIELDS);
+      expect(decoded.fields).toMatchObject(FIXTURE_FIELDS);
       expect(decoded.parameters).toEqual(FIXTURE_PARAMETERS);
       expect(decoded.properties).toEqual([]);
       expect(decoded.events).toEqual([]);

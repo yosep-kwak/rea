@@ -36,7 +36,7 @@ the session. MCP requires an absolute filesystem path:
 
 The summary retains the complete decoded Evidence in the session and returns a
 linked `inspect_analysis_view` overview: artifact identity, metadata version,
-index widths and `counts` (`sections`, `images`, `types`, `methods`,
+index widths and `counts` (`sections`, `assemblies`, `images`, `types`, `methods`,
 `nested_types`, `fields`, `properties`, `events`, `parameters` and
 `string_literals`) without rows. Use `normalized_result.parent_evidence_id` to page
 the original rows without reopening or decoding the file:
@@ -56,13 +56,13 @@ the original rows without reopening or decoding the file:
 }
 ```
 
-Collections are `sections`, `images`, `types`, `methods`, `fields`,
+Collections are `sections`, `assemblies`, `images`, `types`, `methods`, `fields`,
 `properties`, `events`, `parameters`, `string_literals`, `method_addresses`,
 `return_types`, `field_types`, `parameter_types`, `code_gen_modules`,
 `generic_method_instances` and `generic_method_issues`. Every returned row includes
 its source `index`, scoped by artifact SHA-256 and collection. All collections
 accept batch `indices` and `fields`. Exact `names` filtering is supported for
-`sections`, `images`, `types`, `methods`, `fields`, `properties`, `events`,
+`sections`, `assemblies`, `images`, `types`, `methods`, `fields`, `properties`, `events`,
 `parameters`, `return_types`, `field_types`, `parameter_types` and
 `generic_method_instances`. Native type names match the retained rendered display value exactly; every same-name row
 keeps its source index, and an unavailable (`null`) name never matches a string.
@@ -198,6 +198,27 @@ not returned; each nested type's `declaring_type` carries that relationship.
 A type's `declaring_type` is derived from the `nestedTypes` section and is `-1`
 for top-level types. The start of an empty range can retain the original value
 `-1`.
+
+Version 39 also exposes assembly identity using the 68-byte assembly records
+in Unity 6000.3.15f1's `GlobalMetadataFileInternals.h`. Each `assemblies` row
+contains the exact `name`, dotted `version`, `culture`, eight raw
+`public_key_token` bytes as lowercase hex and `image_index`. Each image carries
+its reciprocal `assembly_index`. Assembly, image, type, method and field rows
+carry a `token` as eight lowercase hex digits with a `0x` prefix and an
+absolute `source_offset` pointing to the token's four bytes in the metadata
+artifact. The artifact SHA-256 and row index scope this location. TypeDef,
+MethodDef and FieldDef tokens have nonzero row IDs and are unique within their
+declaring image. The same token can identify a different row in another image.
+Names preserve case and nested identities use the enclosing type index. Field
+flags, custom attributes and exact signatures remain unavailable.
+
+Unity 6000.3.15f1's owned Windows builds also record a dedicated `__Generated`
+runtime image with nil AssemblyDef and Module tokens. The reader preserves
+those exact bytes only for the reciprocal generated image and its recognized
+runtime declarations. Ordinary images and declarations require nonzero RIDs.
+
+Earlier layouts and historical Evidence without these facts omit the assembly
+and token properties. Their summaries report `counts.assemblies` as `null`.
 
 The complete inventory of a large game is several megabytes and can exceed
 the MCP response budget. Summary delivery and filtered, projected pages keep
@@ -514,19 +535,22 @@ A version other than 24, 27, 29, 31 or 39 fails as an unsupported target with
 Damaged metadata returns an input error (`invalid_format`) whose
 message names one reason:
 
-| Reason                    | Meaning                                                                                                          |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `truncated-header`        | The file is shorter than the header.                                                                             |
-| `unexpected-header-size`  | `stringLiterals.offset` is not the header size: 264 bytes for version 24, 256 for 27, 29 and 31, 380 for 39.     |
-| `section-out-of-bounds`   | A section extends beyond the file, or a non-empty section starts inside the header.                              |
-| `section-overlap`         | Two sections overlap. Zero-size sections are exempt and gaps are allowed.                                        |
-| `record-size-mismatch`    | A section size does not divide into its records, or the record size differs from the one the index widths imply. |
-| `type-index-width`        | The record used to derive the type index width implies no 1, 2 or 4 byte width.                                  |
-| `index-out-of-range`      | A serialized index or range points outside its target collection.                                                |
-| `nested-type-conflict`    | A type is listed as nested in two types, in itself, or in a cycle of declaring types.                            |
-| `declaring-type-mismatch` | A method inside a type's method range names a different type, or a method lies outside its type's range.         |
-| `image-range-overlap`     | Two images claim the same type definitions.                                                                      |
-| `invalid-string`          | A name index is outside the strings section, its string is unterminated, or it is not valid UTF-8.               |
+| Reason                     | Meaning                                                                                                          |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `truncated-header`         | The file is shorter than the header.                                                                             |
+| `unexpected-header-size`   | `stringLiterals.offset` is not the header size: 264 bytes for version 24, 256 for 27, 29 and 31, 380 for 39.     |
+| `section-out-of-bounds`    | A section extends beyond the file, or a non-empty section starts inside the header.                              |
+| `section-overlap`          | Two sections overlap. Zero-size sections are exempt and gaps are allowed.                                        |
+| `record-size-mismatch`     | A section size does not divide into its records, or the record size differs from the one the index widths imply. |
+| `type-index-width`         | The record used to derive the type index width implies no 1, 2 or 4 byte width.                                  |
+| `index-out-of-range`       | A serialized index or range points outside its target collection.                                                |
+| `nested-type-conflict`     | A type is listed as nested in two types, in itself, or in a cycle of declaring types.                            |
+| `declaring-type-mismatch`  | A method inside a type's method range names a different type, or a method lies outside its type's range.         |
+| `image-range-overlap`      | Two images claim the same type definitions.                                                                      |
+| `metadata-owner-mismatch`  | An assembly, image or declaration has no consistent owner in the version 39 layout.                              |
+| `invalid-metadata-token`   | A version 39 assembly or declaration token has the wrong table tag or a zero row ID.                             |
+| `duplicate-metadata-token` | A version 39 declaration token is reused within its declaring image.                                             |
+| `invalid-string`           | A name index is outside the strings section, its string is unterminated, or it is not valid UTF-8.               |
 
 Record extents are checked for the decoded images, types, methods, fields,
 properties, events, parameters, string literals, nested types, generic

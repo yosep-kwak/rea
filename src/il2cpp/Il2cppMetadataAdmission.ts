@@ -7,6 +7,15 @@ import type {
 // Minimum serialized row shapes; actual integer widths and the report envelope
 // are checked exactly after decoding. This lower bound never refuses a fitting report.
 const emptyRows = {
+  assemblies: {
+    name: "",
+    culture: "",
+    version: "0.0.0.0",
+    public_key_token: "0000000000000000",
+    image_index: 0,
+    token: "0x20000001",
+    source_offset: 0,
+  },
   images: { name: "", type_start: 0, type_count: 0 },
   types: {
     name: "",
@@ -24,6 +33,12 @@ const emptyRows = {
   parameters: { name: "", method: 0 },
   string_literals: { value: "", value_base64: null },
 };
+const identityMinimum =
+  JSON.stringify({
+    token: "0x00000001",
+    source_offset: 0,
+  }).length - 1;
+const imageAssemblyMinimum = JSON.stringify({ assembly_index: 0 }).length - 1;
 
 /**
  * Smallest serialized generic method instance row; checked against the
@@ -58,7 +73,12 @@ export const createIl2cppMetadataAdmission = (
     beforeRows(counts: Il2cppMetadataRowCounts) {
       let minimum = 0;
       for (const key of Object.keys(emptyRows) as (keyof typeof emptyRows)[])
-        minimum += counts[key] * JSON.stringify(emptyRows[key]).length;
+        minimum += (counts[key] ?? 0) * JSON.stringify(emptyRows[key]).length;
+      if (counts.assemblies !== undefined)
+        minimum +=
+          (counts.images + counts.types + counts.methods + counts.fields) *
+            identityMinimum +
+          counts.images * imageAssemblyMinimum;
       if (linked)
         minimum +=
           counts.methods *

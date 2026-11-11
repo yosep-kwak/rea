@@ -4,6 +4,8 @@ import type { AnalysisError } from "../analysisErrorBase.js";
 import type { JsonValue } from "../jsonValue.js";
 import { isImmutableJsonSnapshot } from "../immutableJson.js";
 import {
+  il2cppMetadataAssemblySchema,
+  il2cppMetadataFieldSchema,
   il2cppMetadataImageSchema,
   il2cppMetadataMemberSchema,
   il2cppMetadataMethodSchema,
@@ -38,6 +40,7 @@ import {
 
 const countsSchema = z.strictObject({
   sections: z.number().int().nonnegative(),
+  assemblies: z.number().int().nonnegative().nullable().optional(),
   images: z.number().int().nonnegative(),
   types: z.number().int().nonnegative(),
   methods: z.number().int().nonnegative(),
@@ -77,6 +80,7 @@ const countsSchema = z.strictObject({
 export const il2cppMetadataSummarySchema = il2cppMetadataObjectSchema
   .omit({
     sections: true,
+    assemblies: true,
     images: true,
     types: true,
     methods: true,
@@ -112,6 +116,9 @@ const indexSchema = z.number().int().nonnegative();
 const sectionRowSchema = il2cppMetadataSectionSchema.extend({
   index: indexSchema,
 });
+const assemblyRowSchema = il2cppMetadataAssemblySchema.extend({
+  index: indexSchema,
+});
 const imageRowSchema = il2cppMetadataImageSchema.extend({ index: indexSchema });
 const typeRowSchema = il2cppMetadataTypeSchema.extend({ index: indexSchema });
 const methodRowSchema = il2cppMetadataMethodSchema.extend({
@@ -120,6 +127,7 @@ const methodRowSchema = il2cppMetadataMethodSchema.extend({
 const memberRowSchema = il2cppMetadataMemberSchema.extend({
   index: indexSchema,
 });
+const fieldRowSchema = il2cppMetadataFieldSchema.extend({ index: indexSchema });
 const parameterRowSchema = il2cppMetadataParameterSchema.extend({
   index: indexSchema,
 });
@@ -161,6 +169,11 @@ export const il2cppMetadataViewRequestSchema = z.discriminatedUnion(
     }),
     z.strictObject({
       ...page,
+      collection: z.literal("assemblies"),
+      fields: z.array(assemblyRowSchema.keyof()).optional(),
+    }),
+    z.strictObject({
+      ...page,
       collection: z.literal("images"),
       fields: z.array(imageRowSchema.keyof()).optional(),
     }),
@@ -178,7 +191,13 @@ export const il2cppMetadataViewRequestSchema = z.discriminatedUnion(
       declaring_types: declaringTypes,
       fields: z.array(methodRowSchema.keyof()).optional(),
     }),
-    ...(["fields", "properties", "events"] as const).map((collection) =>
+    z.strictObject({
+      ...page,
+      collection: z.literal("fields"),
+      declaring_types: declaringTypes,
+      fields: z.array(fieldRowSchema.keyof()).optional(),
+    }),
+    ...(["properties", "events"] as const).map((collection) =>
       z.strictObject({
         ...page,
         collection: z.literal(collection),
@@ -245,10 +264,12 @@ export const il2cppMetadataViewRequestSchema = z.discriminatedUnion(
 
 export const il2cppMetadataViewItemsSchema = z.union([
   z.array(sectionRowSchema.partial().required({ index: true })),
+  z.array(assemblyRowSchema.partial().required({ index: true })),
   z.array(imageRowSchema.partial().required({ index: true })),
   z.array(typeRowSchema.partial().required({ index: true })),
   z.array(methodRowSchema.partial().required({ index: true })),
   z.array(memberRowSchema.partial().required({ index: true })),
+  z.array(fieldRowSchema.partial().required({ index: true })),
   z.array(parameterRowSchema.partial().required({ index: true })),
   z.array(stringLiteralRowSchema.partial().required({ index: true })),
   z.array(methodAddressRowSchema.partial().required({ index: true })),
@@ -303,6 +324,7 @@ const parseMetadataReport = (
     report,
     counts: {
       sections: report.sections.length,
+      assemblies: report.assemblies?.length ?? null,
       images: report.images.length,
       types: report.types.length,
       methods: report.methods.length,
@@ -371,7 +393,7 @@ const selectFields = (
   fields: Set<string> | undefined,
 ) => {
   const item: { index: number } & Record<string, JsonValue> = { index };
-  const values: Readonly<Record<string, JsonValue>> = row;
+  const values: Readonly<Record<string, JsonValue | undefined>> = row;
   for (const key of Object.keys(values)) {
     const value = values[key];
     if (value !== undefined && (fields === undefined || fields.has(key)))
@@ -532,7 +554,7 @@ export const projectIl2cppMetadataView = (
           path: ["view"],
           reason: "invalid_value",
           message:
-            "IL2CPP metadata Evidence supports summary and selected sections, images, types, methods, member, parameter, string literal, method address, type reference, generic method instance and generic method issue pages.",
+            "IL2CPP metadata Evidence supports summary and selected sections, assemblies, images, types, methods, member, parameter, string literal, method address, type reference, generic method instance and generic method issue pages.",
         },
       ]),
     );
@@ -557,6 +579,7 @@ export const projectIl2cppMetadataView = (
     );
   const {
     sections,
+    assemblies,
     images,
     types,
     methods,
@@ -579,6 +602,7 @@ export const projectIl2cppMetadataView = (
         ? null
         : report.binary?.generic_methods?.issues,
     sections,
+    assemblies,
     images,
     types,
     methods,
@@ -600,6 +624,13 @@ export const projectIl2cppMetadataView = (
     artifact: { path: report.artifact.path, sha256: report.artifact.sha256 },
     limitations: [...parent.limitations],
     unknowns: [
+      ...(assemblies !== undefined
+        ? []
+        : [
+            report.metadata_version === 39
+              ? "Retained Evidence did not collect assembly identity or declaration tokens. Reinspect the metadata to acquire these facts."
+              : "Assembly identity and public declaration tokens are unavailable for this metadata layout.",
+          ]),
       ...(report.binary != null && report.binary.code_gen_modules_field === null
         ? [
             "Module-array association is inferred from executable byte patterns; instruction boundaries and runtime use remain unverified.",
@@ -694,7 +725,10 @@ export const projectIl2cppMetadataView = (
         {
           path: ["view", "collection"],
           reason: "invalid_value",
-          message: `Retained Evidence did not collect ${view.collection}; inspect the metadata again to acquire these facts.`,
+          message:
+            view.collection === "assemblies" && report.metadata_version !== 39
+              ? "Assembly identity is unavailable for this metadata layout."
+              : `Retained Evidence did not collect ${view.collection}; inspect the metadata again to acquire these facts.`,
         },
       ]),
     );
